@@ -223,13 +223,36 @@ pub fn start(shared: &Rc<AppShared>) {
         // Grab/ungrab tracks `active_receiver` directly rather than
         // only the edge event above, so it also engages when the
         // Devices page's manual "Control this device" button sets it.
-        if shared.backend.coordinator.active_receiver_sync().is_some() {
+        //
+        // MUST also check `is_emergency_stopped` — a real incident
+        // during development found this the hard way: with only the
+        // `active_receiver` check, Ctrl+Shift+Escape correctly paused
+        // input forwarding/injection but left the local pointer
+        // grabbed and invisible, because `emergency_stop()` doesn't
+        // clear `active_receiver` (resuming should restore the same
+        // target without re-selecting it) — so this loop kept
+        // re-grabbing every 50 ms with no way to stop except killing
+        // the process. A pointer lockout with no in-app escape hatch
+        // is exactly the failure mode Emergency Stop exists to
+        // prevent; it must never require killing the app to recover.
+        let should_grab = should_grab_pointer(
+            shared.backend.coordinator.is_emergency_stopped(),
+            shared.backend.coordinator.active_receiver_sync(),
+        );
+        if should_grab {
             watcher.grab();
         } else {
             watcher.ungrab();
         }
         glib::ControlFlow::Continue
     });
+}
+
+/// Extracted so this specific decision — the one that caused a real
+/// "mouse locked with no way out but killing the app" incident during
+/// development — is unit tested directly, not just read carefully.
+fn should_grab_pointer(emergency_stopped: bool, active_receiver: Option<ConnId>) -> bool {
+    !emergency_stopped && active_receiver.is_some()
 }
 
 fn activate(shared: &Rc<AppShared>, conn_id: ConnId) {
@@ -260,5 +283,35 @@ mod tests {
     #[test]
     fn middle_of_screen_is_no_edge() {
         assert_eq!(edge_for_x(960, 1920), None);
+    }
+
+    /// Regression test for a real incident: a user hit Ctrl+Shift+Escape
+    /// while controlling a peer, expecting the local mouse back, but
+    /// it stayed grabbed/invisible because the grab decision only
+    /// checked `active_receiver` — `emergency_stop()` intentionally
+    /// doesn't clear that (so resuming restores the same target), so
+    /// nothing ever told the pointer to come back. Recovering required
+    /// killing the whole app. This must never regress.
+    #[test]
+    fn emergency_stop_forces_ungrab_even_with_a_target_still_set() {
+        assert!(!should_grab_pointer(
+            /* emergency_stopped */ true,
+            /* active_receiver */ Some(0),
+        ));
+    }
+
+    #[test]
+    fn grabs_when_targeting_a_peer_and_not_stopped() {
+        assert!(should_grab_pointer(false, Some(0)));
+    }
+
+    #[test]
+    fn does_not_grab_with_no_target() {
+        assert!(!should_grab_pointer(false, None));
+    }
+
+    #[test]
+    fn does_not_grab_when_stopped_with_no_target_either() {
+        assert!(!should_grab_pointer(true, None));
     }
 }

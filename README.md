@@ -16,6 +16,11 @@ Everything you need to start is here:
 - [`SKELETON.md`](SKELETON.md) — concrete Cargo workspace layout +
   file-by-file starter to scaffold a new `entanglo-linux` project.
 
+**Picking this up mid-development?** Start with the "Handover status"
+section at the top of [`docs/DEV.md`](docs/DEV.md) instead of this
+file — it says exactly what's done, what's just been fixed but not
+yet re-verified live, and what to check first.
+
 ---
 
 ## TL;DR if you have 60 seconds

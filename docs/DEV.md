@@ -1,5 +1,38 @@
 # Dev setup — entanglo-linux
 
+## Handover status (read this first)
+
+As of 2026-09-01: Phase 1 (see `ROADMAP.md`) is functionally complete
+and has been exercised against **real, live peers on the LAN** — a
+real Mac (`entanglo-macos` 0.1.58) and a real Android box
+(`entanglo-android`), not just loopback tests. Trust, pairing,
+heartbeats, edge-detection, and pointer grab/hide have all been
+observed working live at some point in this session. That said, two
+things need attention before calling this solid:
+
+1. **A real safety bug was just fixed but not yet re-verified live.**
+   `edge.rs`'s pointer-grab loop used to ignore emergency-stop state,
+   so hitting Ctrl+Shift+Escape while controlling a peer left the
+   local mouse grabbed/invisible with no in-app recovery — the
+   developer had to `pkill -9 -f entanglo-linux` to get their own
+   mouse back. The fix (`should_grab_pointer`, `edge.rs`) is
+   committed and unit-tested (`cargo test --workspace` — 39 tests
+   green), but **has not been re-tested against a real running app and
+   a real peer since the fix landed**. Do that first: `cargo build -p
+   entanglo-linux`, launch it, grab control of any trusted peer
+   (edge-push or the Devices page "Control this device" button), hit
+   Ctrl+Shift+Escape, and confirm the local cursor is immediately
+   visible and movable again. See `ROADMAP.md`'s pointer-grab bullet
+   for the full incident writeup.
+2. **Real Mac control was never confirmed end-to-end with the pointer
+   fix in place** — only Android control was confirmed live, and that
+   was with the *buggy* grab code still active. Re-verify against the
+   Mac once (1) above passes.
+
+Everything else below this point (setup, build, test commands,
+"verified state") is still accurate and was true at the time it was
+written; it's kept as-is rather than restated.
+
 ## First-time setup on the Debian dev machine
 
 ```bash
@@ -123,13 +156,21 @@ widgets bound to `state::AppShared`, updated from real
 `CoordinatorEvent`s. Everything below is still a gap, tracked with
 ✅/🚧/⬜ status per item in `ROADMAP.md`'s Phase 1 deliverables list:
 
-- The seven other pages (Input Sharing, Files, Print, Network, News &
-  Updates, Settings, Logs) are still placeholder `Label`s.
-- No edge-detection or emergency-stop UI yet — `Coordinator::
-  set_active_receiver` exists and is reachable today only via a manual
-  "Control this device" button on the Devices page.
-- `features/*` are Phase 2 stubs that return "not yet implemented"
-  errors or no-ops.
+- **This section is stale as of the first pass — updated 2026-09-01,
+  see below.** Files, Print, and News & Updates remain placeholder
+  pages (deliberately, per `ROADMAP.md` — real Phase 2 protocol/backend
+  work, not just UI). Input Sharing, Network, Logs, and Settings are
+  now real, live-data pages, not placeholders.
+- Edge-detection + pointer grab/hide now exist for real
+  (`crates/entanglo-linux/src/edge.rs`, X11 only — see `ROADMAP.md`'s
+  Wayland risk note) and are reachable both via true edge-push and the
+  Devices page's manual "Control this device" button. **Just fixed a
+  real safety bug here** (emergency-stop wasn't releasing the grab) —
+  see "Handover status" at the top of this file before trusting this
+  fully.
+- `features/network_quality.rs` and `logging.rs` are real, not stubs,
+  and back the Network/Logs pages with live data. `features/clipboard`,
+  `file_transfer`, `screenshot`, `url_push` are still Phase 2 stubs.
 - No CI workflow yet — add one so `cargo check --workspace` and
   `cargo test --workspace` run on every push (needs a runner image
   with `libgtk-4-dev`/`libadwaita-1-dev`, not just Rust).
@@ -137,4 +178,8 @@ widgets bound to `state::AppShared`, updated from real
   pass — no *incoming* pairRequest happened to arrive live (only
   outgoing ones, to Android and the Mac). Worth a deliberate test:
   have another Entanglo peer dial this device and confirm the Accept
-  button actually calls back through to `session.rs`'s oneshot.
+  button actually calls back through to `session.rs`'s oneshot. Note
+  also that the real Mac (0.1.58) never sends `pairRequest` at all —
+  see the Trust store section of `ROADMAP.md` — so this path can only
+  be exercised against Android or a future Mac build that implements
+  the wire ceremony.

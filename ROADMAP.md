@@ -158,6 +158,38 @@ live reference implementations, not just loopback-TCP unit tests.
   calls themselves need a real X11 session to exercise, confirmed
   live on this machine (a genuine X11 desktop, not the Wayland
   session this was originally scoped assuming).
+  **⚠️ Real production incident, found live, fixed but not yet
+  re-verified live**: the first cut of the grab loop decided whether
+  to grab using only `active_receiver_sync().is_some()`, never
+  `is_emergency_stopped()`. `Coordinator::emergency_stop()`
+  deliberately does *not* clear `active_receiver` (so `resume()`
+  restores the same target without re-selecting it), so hitting the
+  Ctrl+Shift+Escape hotkey correctly paused input forwarding/injection
+  at the protocol level but left the local pointer grabbed and
+  invisible — with no in-app way to get it back. This happened to the
+  actual developer on the actual dev machine while controlling a real
+  peer: "perso il controllo sul mio mac e non controlla altri pc" (lost
+  control of the physical mouse, and it wasn't controlling any other
+  PC either). Recovery required `pkill -9 -f entanglo-linux` from a
+  second terminal (X11 releases a grab when the owning client
+  disconnects) — confirmed by the user afterward: "funziona ora (il
+  mouse su imac1)". **Root-cause fix**: extracted a pure
+  `should_grab_pointer(emergency_stopped, active_receiver) -> bool`
+  (`!emergency_stopped && active_receiver.is_some()`) and made the
+  poll loop call it instead of inlining the old one-sided check; 4 new
+  regression tests in `edge::tests`, including
+  `emergency_stop_forces_ungrab_even_with_a_target_still_set` pinned
+  directly to this incident. All 39 workspace tests pass
+  (`cargo test --workspace`). **What's NOT yet done**: this fix has
+  only been verified with `cargo test`, not by relaunching the app and
+  actually hitting Ctrl+Shift+Escape while grabbed against a real
+  peer again — that live re-check is the very next thing to do before
+  trusting this fully. If you're picking this up: rebuild, launch,
+  grab control of a peer, hit Ctrl+Shift+Escape, and confirm the local
+  cursor is visible and movable immediately — don't take the passing
+  unit tests as proof by themselves given how this bug slipped through
+  the first time (it was a real X11 grab, not something a loopback
+  test would ever have caught).
 - ✅ `releaseControl` on the receiver when local input is touched —
   both sides now wired: `Coordinator::enable_controller`'s per-device
   evdev loop sends it the instant *any* real local hardware input
