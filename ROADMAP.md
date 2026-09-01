@@ -106,9 +106,25 @@ live reference implementations, not just loopback-TCP unit tests.
   path end to end — that needs a completed pairing (still pending
   human approval on the real Mac) to exercise, not just the
   capture/inject mechanism in isolation.
-- ⬜ Cursor edge-detection on the controller — still needs the
-  Wayland pointer-position spike from `ROADMAP.md` Risks. The manual
-  "Control this device" button (see above) is the interim substitute.
+- ✅ Cursor edge-detection on the controller — **X11 only**
+  (`crates/entanglo-linux/src/edge.rs`), via `XQueryPointer` polled at
+  20 Hz on the GTK main context. The Wayland pointer-position problem
+  flagged in Risks below is still unsolved — on a Wayland session
+  `EdgeWatcher::connect` just returns `None` and edge-switching is
+  silently unavailable there, same as before; the manual "Control
+  this device" button keeps working everywhere regardless. Config UI
+  is a per-device dropdown on the Devices page (No edge / Left edge /
+  Right edge). **Known rough edge**: no pointer grab/warp — pushing
+  the cursor to the assigned edge starts forwarding input to that
+  peer, but the local cursor keeps moving/clamping normally rather
+  than visually "handing off." Getting control back relies on the
+  peer touching their own input (`releaseControl`) or the local
+  Ctrl+Shift+Escape hotkey — both already work, so this isn't a dead
+  end, just not polished. Debounce logic unit tested
+  (`edge::tests`); the actual `XQueryPointer` round trip needs a real
+  X11 session to exercise, confirmed live on this machine (a genuine
+  X11 desktop, not the Wayland session this was originally scoped
+  assuming).
 - ✅ `releaseControl` on the receiver when local input is touched —
   both sides now wired: `Coordinator::enable_controller`'s per-device
   evdev loop sends it the instant *any* real local hardware input

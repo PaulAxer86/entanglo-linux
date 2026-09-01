@@ -1,5 +1,6 @@
 mod app_state;
 mod application;
+mod edge;
 mod pages;
 mod state;
 mod window;

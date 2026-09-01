@@ -19,6 +19,7 @@ pub fn build(
 ) -> ApplicationWindow {
     let shared = Rc::new(AppShared::new(backend));
     let pages = crate::pages::build_all(&shared);
+    crate::edge::start(&shared);
 
     let sidebar_list = ListBox::new();
     sidebar_list.add_css_class("navigation-sidebar");

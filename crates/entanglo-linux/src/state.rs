@@ -16,6 +16,7 @@ use entanglo_core::net::{ConnId, CoordinatorEvent};
 use entanglo_core::protocol::payloads::PairRequestPayload;
 
 use crate::app_state::Backend;
+use crate::edge::ScreenEdge;
 
 pub struct DeviceRow {
     pub device_id: Option<String>,
@@ -63,6 +64,10 @@ pub struct AppShared {
     devices: RefCell<HashMap<ConnId, DeviceRow>>,
     pending_pairing: RefCell<HashMap<ConnId, PendingPairing>>,
     network_stats: RefCell<HashMap<ConnId, NetworkStat>>,
+    /// Which screen edge (if any) triggers `set_active_receiver` for
+    /// each trusted peer — set from the dropdown in `redraw_devices`,
+    /// read by `edge::start`'s poll loop. See `edge.rs`.
+    edge_assignments: RefCell<HashMap<ConnId, ScreenEdge>>,
 }
 
 impl AppShared {
@@ -74,7 +79,18 @@ impl AppShared {
             devices: RefCell::new(HashMap::new()),
             pending_pairing: RefCell::new(HashMap::new()),
             network_stats: RefCell::new(HashMap::new()),
+            edge_assignments: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Looks up which trusted peer (if any) is assigned to `edge` —
+    /// `edge::start`'s poll loop calls this on every crossing.
+    pub fn conn_id_for_edge(&self, edge: ScreenEdge) -> Option<ConnId> {
+        self.edge_assignments
+            .borrow()
+            .iter()
+            .find(|(_, assigned)| **assigned == edge)
+            .map(|(conn_id, _)| *conn_id)
     }
 
     /// For the Network page's poll-based redraw — see
@@ -142,6 +158,7 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             shared.devices.borrow_mut().remove(&conn_id);
             shared.pending_pairing.borrow_mut().remove(&conn_id);
             shared.network_stats.borrow_mut().remove(&conn_id);
+            shared.edge_assignments.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
             redraw_pairing(shared);
         }
@@ -195,11 +212,10 @@ fn redraw_devices(shared: &Rc<AppShared>) {
         entry.append(&gtk::Label::new(Some(&label_text)));
 
         if row.trusted {
-            // Manual fallback for "who am I controlling" until real
-            // edge-detection lands — see the ⬜ item in ROADMAP.md
-            // Phase 1. Calls `Coordinator::set_active_receiver` on
-            // the backend thread via its `Handle`, since this button
-            // click runs on the GTK thread.
+            // Immediate manual fallback for "who am I controlling" —
+            // calls `Coordinator::set_active_receiver` on the backend
+            // thread via its `Handle`, since this button click runs
+            // on the GTK thread.
             let control_button = gtk::Button::with_label("Control this device");
             let handle = shared.backend.handle.clone();
             let coordinator = Arc::clone(&shared.backend.coordinator);
@@ -210,6 +226,39 @@ fn redraw_devices(shared: &Rc<AppShared>) {
                 });
             });
             entry.append(&control_button);
+
+            // Real edge-switching config: which screen edge (if any)
+            // hands control to this peer when the cursor is pushed
+            // into it — see edge.rs. X11-only; the dropdown still
+            // shows on Wayland (harmless), it just never fires
+            // because `edge::start` never got an X11 connection to
+            // poll from.
+            let options: Vec<&str> = std::iter::once("No edge")
+                .chain(ScreenEdge::ALL.iter().map(|e| e.label()))
+                .collect();
+            let model = gtk::StringList::new(&options);
+            let current_selection = shared
+                .edge_assignments
+                .borrow()
+                .get(&conn_id)
+                .and_then(|assigned| ScreenEdge::ALL.iter().position(|e| e == assigned))
+                .map(|index| (index + 1) as u32)
+                .unwrap_or(0);
+            let edge_dropdown = gtk::DropDown::builder()
+                .model(&model)
+                .selected(current_selection)
+                .build();
+            let shared_edge = Rc::clone(shared);
+            edge_dropdown.connect_selected_notify(move |dropdown| {
+                let selected = dropdown.selected();
+                let mut assignments = shared_edge.edge_assignments.borrow_mut();
+                if selected == 0 {
+                    assignments.remove(&conn_id);
+                } else {
+                    assignments.insert(conn_id, ScreenEdge::ALL[(selected - 1) as usize]);
+                }
+            });
+            entry.append(&edge_dropdown);
         }
 
         shared.devices_list.append(&entry);
