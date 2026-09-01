@@ -71,7 +71,7 @@ impl EntangloMessage {
     }
 }
 
-fn unix_timestamp_now() -> f64 {
+pub(crate) fn unix_timestamp_now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before unix epoch")

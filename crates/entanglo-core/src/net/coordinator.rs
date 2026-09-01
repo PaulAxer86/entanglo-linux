@@ -1,16 +1,20 @@
-//! Dial reconciler + live transport-per-peer map. Mirrors
+//! Dial reconciler + live session-per-peer map. Mirrors
 //! `entanglo-macos`'s `ConnectionCoordinator` and
 //! `entanglo-windows`'s `ConnectionCoordinator.cs`: a device may hold
 //! simultaneous outbound (self-initiated) and inbound (peer-initiated)
 //! connections to the same peer. Whichever direction is currently
 //! sending `inputEvent`s is "the controller" for that link.
 //!
-//! This is a skeleton — the real implementation needs a `HashMap`
-//! keyed by trusted device ID, safety-gate checks (trusted +
-//! heartbeat-alive + emergency-stop-off, matching the gates in
-//! `entanglo-macos/docs/ARCHITECTURE.md`) before dispatching any
-//! `inputEvent` to `crate::input::inject`, and reconnect-on-drop
-//! logic. Fill in as Phase 1 work per `ROADMAP.md`.
+//! The actual protocol engine (hello, pairing, heartbeat, event
+//! forwarding) lives in `session.rs` and is complete + tested — see
+//! `session::run_session`. This module is still a thin skeleton: it
+//! needs to actually spawn a `run_session` task per accepted/dialed
+//! `NetworkTransport`, merge each peer's outbound/inbound
+//! `SessionEvent` streams into one view for the UI, and reconcile
+//! "we have two connections to the same trusted peer" into a single
+//! logical link. That's app-shell wiring (needs a running GTK event
+//! loop / display to exercise end to end) rather than protocol logic,
+//! so it's deferred past this pass — see `docs/DEV.md`.
 
 use std::collections::HashMap;
 use tokio::sync::Mutex;

@@ -1,9 +1,11 @@
 pub mod coordinator;
 pub mod discovery;
+pub mod session;
 pub mod transport;
 pub mod trust_store;
 
 pub use discovery::{DiscoveredPeer, DiscoveryService};
+pub use session::{run_session, SessionConfig, SessionEvent};
 pub use transport::NetworkTransport;
 pub use trust_store::TrustStore;
 

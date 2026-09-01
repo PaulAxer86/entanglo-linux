@@ -18,44 +18,69 @@ else.
 
 ### Deliverables
 
-- Cargo workspace with `entanglo-core` (protocol + transport + input
+Status legend: ✅ done + tested, 🚧 written but not exercised against
+real hardware/display, ⬜ not started. See `docs/DEV.md` for exactly
+what "tested" means for each ✅ item — mostly loopback-TCP integration
+tests, since this scaffold was built on a machine with no display
+server and no `/dev/input`/`/dev/uinput` access of its own.
+
+- ✅ Cargo workspace with `entanglo-core` (protocol + transport + input
   translation, no UI) and `entanglo-linux` (GTK4 app) crates — see
   `SKELETON.md`.
-- GTK4/libadwaita app shell: `AdwNavigationSplitView` with
-  **Dashboard**, **Devices**, **Pairing**, **Settings** pages.
-- `udev` rule shipped in `packaging/60-entanglo-uinput.rules`:
+- 🚧 GTK4/libadwaita app shell: `AdwNavigationSplitView` with all ten
+  pages present and sidebar navigation wired up, but every page is
+  still a placeholder — none has its real UI or is wired to
+  `net::session` events yet.
+- ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`:
   ```
   KERNEL=="uinput", GROUP="input", MODE="0660"
   ```
-  plus first-run onboarding that checks `$USER` is in the `input`
+  ⬜ first-run onboarding that checks `$USER` is in the `input`
   group and, if not, shows the exact `usermod` command to run (never
   auto-elevates — same posture as the Mac's permission model, see
-  `entanglo-macos/docs/PERMISSIONS.md`).
-- mDNS advertise + browse for `_entanglo._tcp` via `mdns-sd`.
-- TCP listener on an OS-assigned port + outbound `TcpStream`, via
-  `tokio`.
-- Wire framing (4-byte big-endian length prefix + JSON envelope) via
+  `entanglo-macos/docs/PERMISSIONS.md`) — not written yet, needs the
+  Settings page.
+- 🚧 mDNS advertise + browse for `_entanglo._tcp` via `mdns-sd` —
+  written, compiles, not exercised (would need two machines on a real
+  LAN or a loopback mDNS setup neither of which this pass covers).
+- ✅ TCP listener on an OS-assigned port + outbound `TcpStream`, via
+  `tokio` — exercised directly by the session integration test.
+- ✅ Wire framing (4-byte big-endian length prefix + JSON envelope) via
   `tokio_util::codec::Framed` + a custom codec.
-- All payload structs (`#[derive(Serialize, Deserialize)]`) per
+- ✅ All payload structs (`#[derive(Serialize, Deserialize)]`) per
   `PROTOCOL.md` §5.
-- `hello` handshake, both directions.
-- Trust store (Secret Service, fallback encrypted file) + Pairing UX
-  (approve/reject incoming `pairRequest`).
-- Heartbeats (1 Hz) with RTT echo per §5.4.
-- `inputEvent` send (evdev capture from `/dev/input/eventX`) and
+- ✅ `hello` handshake, both directions — `net::session::run_session`,
+  covered by `net::session::tests::two_peers_pair_and_forward_input`.
+- ✅ Trust store (Secret Service, fallback encrypted file) + Pairing UX
+  state machine (approve/reject incoming `pairRequest` via a
+  `SessionEvent::PairingRequested` + oneshot-channel callback) —
+  `net::trust_store` + `net::session`. The Secret Service path itself
+  is untested here (no D-Bus session on this machine); the file
+  fallback's encrypt/decrypt roundtrip is. 🚧 The GTK **Pairing page**
+  that would actually call the callback from a user click doesn't
+  exist yet — still a `Label` placeholder.
+- ✅ Heartbeats (1 Hz) with RTT echo per §5.4 — same integration test
+  exercises at least one heartbeat round trip.
+- 🚧 `inputEvent` send (evdev capture from `/dev/input/eventX`) and
   receive (`/dev/uinput` injection), with the keycode table from
-  `PROTOCOL.md` §7 and the modifier-state translation from §5.5.
-- Cursor edge-detection on the controller (mirror the Mac's
+  `PROTOCOL.md` §7 and the modifier-state translation from §5.5 —
+  `input::capture`/`input::inject` compile against real `evdev` APIs
+  and the keymap/modifier logic has unit tests, but neither has run
+  against an actual `/dev/input`/`/dev/uinput` device yet, and neither
+  is wired to `net::session`'s `InputEvent`/outgoing-input channel.
+- ⬜ Cursor edge-detection on the controller (mirror the Mac's
   "push past the edge → take over peer" UX) — needs the current
   pointer position, which on Wayland means reading it back out of the
   compositor via the portal or a compositor-specific protocol
   extension; on X11 it's a plain `XQueryPointer`. Flag this as the
-  single trickiest Phase 1 item — see Risks below.
-- `releaseControl` on the receiver when local input is touched
-  (detected the same way capture works: watch evdev for events not
-  synthesized by our own uinput device).
-- Emergency stop button in the toolbar (matches the Mac's
-  triple-Escape + explicit button).
+  single trickiest Phase 1 item — see Risks below. Not started.
+- 🚧 `releaseControl` on the receiver when local input is touched —
+  the session side (receiving/emitting `SessionEvent::ReleaseControl`)
+  is done; the sending side (detecting local input via evdev and
+  actually calling it) isn't wired up.
+- ⬜ Emergency stop button in the toolbar (matches the Mac's
+  triple-Escape + explicit button). Not started — needs the Input
+  Sharing page.
 
 ### Test of done
 
