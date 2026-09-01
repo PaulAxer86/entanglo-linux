@@ -31,9 +31,16 @@ live reference implementations, not just loopback-TCP unit tests.
 - ✅ GTK4/libadwaita app shell: `AdwNavigationSplitView` with all ten
   pages, sidebar navigation, and a **real window that opens on a real
   X11 display** — confirmed via `xwininfo`, not just `cargo build`.
-  Dashboard/Devices/Pairing/Input Sharing are live, wired to
-  `net::session` events through `Coordinator`/`state::AppShared`; the
-  other six pages are still placeholders.
+  Dashboard/Devices/Pairing/Input Sharing/Settings/Network/Logs are
+  live, wired to `net::session` events through
+  `Coordinator`/`state::AppShared`. Network and Logs are genuinely
+  Phase 2 features (`entanglo_core::features::network_quality`,
+  `entanglo_core::logging::LogBuffer`) pulled forward because the data
+  was already flowing and the UI cost was small — see the note below.
+  Files, Print, and News & Updates remain placeholders: each needs
+  real new protocol/backend work (chunked file transfer, portal
+  screenshot capture, an HTTP client + website manifest support) that
+  doesn't exist yet, not just a UI pass.
 - ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`, and
   ✅ the "check `$USER` is in the `input` group, show the exact fix"
   onboarding — as a Settings page section rather than a first-run
@@ -135,6 +142,37 @@ clicks were silently dropped by capture — `translate` was looking
 `BTN_LEFT`/`RIGHT`/`MIDDLE` up in the *keyboard* keycode table, which
 doesn't contain them, so cursor movement would have worked but clicks
 never would have. Both covered by new unit tests.
+
+### Two Phase 2 pages pulled forward: Network + Logs
+
+Not part of the original Phase 1 checklist, but low-effort and
+genuinely useful given data that was already flowing:
+
+- ✅ **Logs page** — `entanglo_core::logging::LogBuffer`, a real
+  in-memory ring buffer (500 lines) fed by a second
+  `tracing_subscriber::fmt` layer alongside the existing stderr one
+  (reuses the same formatter via a custom `MakeWriter` rather than
+  hand-rolling a field-visiting `Layer`). The page polls it every
+  1 s. Category filtering (Network/Pairing/Input/Files/Error, matching
+  the Mac's Logs view) is still future work — today it's everything at
+  `$RUST_LOG`'s level, unfiltered. Unit tested
+  (`logging::tests` — push ordering, cap-at-500 eviction, multi-line
+  write splitting).
+- ✅ **Network page** — `entanglo_core::features::network_quality::
+  NetworkQualityMonitor`, one per connected peer, fed real RTTs from
+  `CoordinatorEvent::Heartbeat` (previously received and silently
+  discarded). Shows average RTT + suggested mode
+  (Ethernet Preferred/Wi-Fi OK/Unstable) per peer, polled every 1 s.
+  One known simplification: `NetworkQualityMonitor::record_heartbeat`
+  wants a sequence number to detect gaps, but `CoordinatorEvent::
+  Heartbeat` doesn't carry the peer's own sequence — fed a
+  locally-incrementing counter instead, so gap/missed-heartbeat
+  detection isn't meaningful yet (every arriving heartbeat is
+  recorded, by construction). RTT averaging and the suggested-mode
+  logic that the page actually shows don't depend on that.
+
+Files, Print, and News & Updates were deliberately left as
+placeholders — see the note above.
 
 ### Test of done
 

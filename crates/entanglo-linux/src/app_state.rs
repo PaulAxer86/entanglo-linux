@@ -11,6 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use entanglo_core::logging::LogBuffer;
 use entanglo_core::net::{
     trust_store, Coordinator, CoordinatorEvent, DiscoveryService, TrustStore,
 };
@@ -27,6 +28,7 @@ pub struct Backend {
     pub handle: tokio::runtime::Handle,
     pub local_device_id: String,
     pub local_hello: HelloPayload,
+    pub log_buffer: LogBuffer,
 }
 
 struct Ready {
@@ -38,7 +40,7 @@ struct Ready {
 /// Starts the backend thread and blocks briefly until the coordinator
 /// is ready to use — meant to be called once, early in `main()`,
 /// before the GTK main loop starts.
-pub fn start() -> (Backend, async_channel::Receiver<CoordinatorEvent>) {
+pub fn start(log_buffer: LogBuffer) -> (Backend, async_channel::Receiver<CoordinatorEvent>) {
     let local_hello = HelloPayload {
         device_name: local_device_name(),
         device_model: "Linux".to_string(),
@@ -119,6 +121,7 @@ pub fn start() -> (Backend, async_channel::Receiver<CoordinatorEvent>) {
             handle: ready.handle,
             local_device_id: ready.local_device_id,
             local_hello,
+            log_buffer,
         },
         ui_rx,
     )

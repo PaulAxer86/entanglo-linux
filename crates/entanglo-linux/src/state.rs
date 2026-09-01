@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use gtk::prelude::*;
 
+use entanglo_core::features::network_quality::{NetworkQualityMonitor, SuggestedMode};
 use entanglo_core::net::{ConnId, CoordinatorEvent};
 use entanglo_core::protocol::payloads::PairRequestPayload;
 
@@ -27,6 +28,28 @@ pub struct PendingPairing {
     pub respond: tokio::sync::oneshot::Sender<bool>,
 }
 
+struct NetworkStat {
+    device_name: String,
+    monitor: NetworkQualityMonitor,
+    /// Locally-incrementing counter fed to `NetworkQualityMonitor`,
+    /// which wants a sequence number to detect gaps — but
+    /// `CoordinatorEvent::Heartbeat` only carries the computed RTT,
+    /// not the peer's own sequence (see `net::session::SessionEvent`).
+    /// Every arriving Heartbeat is recorded, so this never actually
+    /// has a gap; the RTT averaging / suggested-mode logic that
+    /// matters for this page doesn't depend on gap detection anyway.
+    local_sequence: u64,
+}
+
+/// Snapshot for the Network page to render — deliberately not a
+/// reference into `AppShared`'s internals, so the page can poll this
+/// without holding a borrow across its own widget-building code.
+pub struct NetworkStatSnapshot {
+    pub device_name: String,
+    pub average_rtt_ms: Option<f64>,
+    pub suggested_mode: SuggestedMode,
+}
+
 /// Owns the long-lived widgets that need to be updated in place as
 /// `CoordinatorEvent`s arrive, plus the data driving them. Pages
 /// embed `devices_list`/`pairing_list` directly (see
@@ -39,6 +62,7 @@ pub struct AppShared {
     pub pairing_list: gtk::ListBox,
     devices: RefCell<HashMap<ConnId, DeviceRow>>,
     pending_pairing: RefCell<HashMap<ConnId, PendingPairing>>,
+    network_stats: RefCell<HashMap<ConnId, NetworkStat>>,
 }
 
 impl AppShared {
@@ -49,7 +73,25 @@ impl AppShared {
             pairing_list: gtk::ListBox::new(),
             devices: RefCell::new(HashMap::new()),
             pending_pairing: RefCell::new(HashMap::new()),
+            network_stats: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// For the Network page's poll-based redraw — see
+    /// `NetworkStatSnapshot`.
+    pub fn network_stats_snapshot(&self) -> Vec<NetworkStatSnapshot> {
+        let mut snapshot: Vec<NetworkStatSnapshot> = self
+            .network_stats
+            .borrow()
+            .values()
+            .map(|stat| NetworkStatSnapshot {
+                device_name: stat.device_name.clone(),
+                average_rtt_ms: stat.monitor.average_rtt_ms(),
+                suggested_mode: stat.monitor.suggested_mode(),
+            })
+            .collect();
+        snapshot.sort_by(|a, b| a.device_name.cmp(&b.device_name));
+        snapshot
     }
 }
 
@@ -99,20 +141,34 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
         CoordinatorEvent::PeerDisconnected { conn_id, .. } => {
             shared.devices.borrow_mut().remove(&conn_id);
             shared.pending_pairing.borrow_mut().remove(&conn_id);
+            shared.network_stats.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
             redraw_pairing(shared);
         }
-        // Heartbeat/InputEvent/ReleaseControl don't have a Phase 1 UI
-        // surface yet (Network page RTT tile and Input Sharing status
-        // are both still placeholders — see ROADMAP.md). InputEvent
-        // in particular is already injected on the backend thread
-        // before it ever reaches this channel (see
+        CoordinatorEvent::Heartbeat { conn_id, rtt_ms } => {
+            let device_name = shared
+                .devices
+                .borrow()
+                .get(&conn_id)
+                .map(|row| row.name.clone())
+                .unwrap_or_else(|| format!("peer {conn_id}"));
+            let mut stats = shared.network_stats.borrow_mut();
+            let stat = stats.entry(conn_id).or_insert_with(|| NetworkStat {
+                device_name: device_name.clone(),
+                monitor: NetworkQualityMonitor::new(),
+                local_sequence: 0,
+            });
+            stat.device_name = device_name;
+            stat.monitor.record_heartbeat(stat.local_sequence, rtt_ms);
+            stat.local_sequence += 1;
+        }
+        // InputEvent/ReleaseControl don't have a Phase 1 UI surface
+        // yet. InputEvent in particular is already injected on the
+        // backend thread before it ever reaches this channel (see
         // `Coordinator::spawn_peer`'s relay loop), so there's nothing
         // for the UI to do with it today besides eventually showing
         // it happened.
-        CoordinatorEvent::Heartbeat { .. }
-        | CoordinatorEvent::InputEvent { .. }
-        | CoordinatorEvent::ReleaseControl { .. } => {}
+        CoordinatorEvent::InputEvent { .. } | CoordinatorEvent::ReleaseControl { .. } => {}
     }
 }
 
