@@ -196,15 +196,30 @@ genuinely useful given data that was already flowing:
 - ✅ **Network page** — `entanglo_core::features::network_quality::
   NetworkQualityMonitor`, one per connected peer, fed real RTTs from
   `CoordinatorEvent::Heartbeat` (previously received and silently
-  discarded). Shows average RTT + suggested mode
-  (Ethernet Preferred/Wi-Fi OK/Unstable) per peer, polled every 1 s.
-  One known simplification: `NetworkQualityMonitor::record_heartbeat`
-  wants a sequence number to detect gaps, but `CoordinatorEvent::
-  Heartbeat` doesn't carry the peer's own sequence — fed a
-  locally-incrementing counter instead, so gap/missed-heartbeat
-  detection isn't meaningful yet (every arriving heartbeat is
-  recorded, by construction). RTT averaging and the suggested-mode
-  logic that the page actually shows don't depend on that.
+  discarded). Shows average RTT + suggested mode per peer, polled
+  every 1 s. **Corrected against the real Mac after seeing it live**:
+  against the actual iMac, this page showed "998.4 ms avg RTT ·
+  Unstable" — the RTT number itself is real and expected (the
+  heartbeat-echo protocol both apps share only echoes a peer's
+  `sentAtMs` on the *next* 1 Hz tick, not immediately on receipt, so
+  the measured "RTT" is inherently cadence-dominated on a fast
+  LAN/VPN — this matches `entanglo-macos/Services/NetworkTransport.swift`'s
+  identical echo-on-next-tick design, not a bug). But the
+  *classification* thresholds this page used (`<5 ms` Ethernet,
+  `<30 ms` Wi-Fi) were invented, never ported from the real Mac.
+  Reading `NetworkQualityService.swift` gave the actual constants —
+  unstable at `avgRtt >= 120 ms` or `loss >= 5%`, offline if no
+  heartbeat ever arrived or the last is `> 3 s` stale — and `network_quality.rs`
+  now matches those exactly, with a new `Offline` state to match.
+  Known gap vs. the Mac: interface-kind (Ethernet vs. Wi-Fi) isn't
+  tracked per-connection on Linux yet, so the non-unstable/offline
+  case always reports `WifiOk` (same conservative default the Mac
+  itself uses for its own `.unknown` interface case). Loss-rate
+  estimation (from heartbeat sequence gaps) is now real too, not a
+  historical stub — see `NetworkQualityMonitor::loss_rate`.
+  Unit tested (`features::network_quality::tests`), including a test
+  asserting 998.4 ms specifically classifies `Unstable`, pinned to
+  what was actually observed live.
 
 Files, Print, and News & Updates were deliberately left as
 placeholders — see the note above.

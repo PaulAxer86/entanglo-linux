@@ -52,6 +52,7 @@ fn refresh(shared: &Rc<AppShared>, list: &ListBox) {
             SuggestedMode::EthernetPreferred => "Ethernet Preferred",
             SuggestedMode::WifiOk => "Wi-Fi OK",
             SuggestedMode::Unstable => "Unstable",
+            SuggestedMode::Offline => "Offline",
         };
         list.append(&gtk::Label::new(Some(&format!(
             "{}  ·  {rtt_text}  ·  {mode_text}",
