@@ -79,13 +79,32 @@ live reference implementations, not just loopback-TCP unit tests.
   Android box came back accepted, trust was written to the real
   keyring, and a second run of the app loaded that same trust from
   disk-backed Secret Service storage and skipped pairing entirely.
-  The Mac correctly did **not** auto-trust — its `pairRequest` is
-  still pending real human approval on that machine, matching the
-  Mac's own human-approval pairing UI. ✅ GTK **Pairing page** exists
-  and is wired to `SessionEvent::PairingRequested` with real
-  Accept/Reject buttons (`state.rs`), though clicking them hasn't
-  been exercised in this pass (would need a *local* incoming
-  pairRequest, which didn't happen to occur live).
+  ✅ GTK **Pairing page** exists and is wired to `SessionEvent::
+  PairingRequested` with real Accept/Reject buttons (`state.rs`).
+  **Correction to an earlier entry here**: this used to say the real
+  Mac "correctly did not auto-trust... matching its human-approval
+  pairing UI." That guess was wrong. Reading `entanglo-macos`'s actual
+  source (`ConnectionCoordinator.swift`, `PairingService.swift`) shows
+  the shipped v0.1.58 app **never sends or handles `pairRequest`/
+  `pairResponse` at all** — confirmed with `grep -rn "\.pairRequest\|
+  \.pairResponse"` across its whole codebase, zero hits outside the
+  `MessageType` enum's declaration. `PairingState.swift` says outright:
+  "v0.1 autoaccept path: the wire-side PIN ceremony lands in 0.2." The
+  real v0.1 trust model is **each side locally decides who to trust
+  from its own Devices list** — no wire negotiation — which is why our
+  `pairRequest` to it just sat unanswered forever; the Mac wasn't
+  ignoring *us*, that message type isn't wired to anything on its end
+  in this version. Fixed with `session::OutgoingMessage::TrustManually`
+  + `Coordinator::trust_manually` + a "Trust" button on the Devices
+  page for any identified-but-not-yet-trusted peer — our own
+  equivalent of the Mac's local "Trust" button. Verified against the
+  real Mac via `entanglo-core/examples/manual_trust_smoke_test.rs`
+  (a GTK-free CLI diagnostic, kept in the repo): `PeerIdentified` →
+  `trust_manually` → `Trusted` → a real `Heartbeat`, all against the
+  live machine, not a mock. Regression-tested too
+  (`net::session::tests::
+  trust_manually_works_against_a_peer_that_never_replies_to_pair_request`,
+  which plays the silent-Mac role on a raw transport).
 - ✅ Heartbeats (1 Hz) with RTT echo per §5.4 — integration-tested;
   live behavior not separately confirmed beyond the successful hello
   exchanges above (heartbeats would need a longer live run than this
@@ -103,9 +122,9 @@ live reference implementations, not just loopback-TCP unit tests.
   capability set. `enable_controller` opened `/dev/input/event*`
   without error under the same permissions. What's still unverified:
   actually driving the cursor/keys of a *paired* peer through this
-  path end to end — that needs a completed pairing (still pending
-  human approval on the real Mac) to exercise, not just the
-  capture/inject mechanism in isolation.
+  path end to end with the real GTK app (the manual-trust CLI
+  diagnostic proved the connection/trust side against the real Mac —
+  see the Trust store entry below — but didn't send any input).
 - ✅ Cursor edge-detection on the controller — **X11 only**
   (`crates/entanglo-linux/src/edge.rs`), via `XQueryPointer` polled at
   20 Hz on the GTK main context. The Wayland pointer-position problem

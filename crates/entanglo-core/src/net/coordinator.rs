@@ -40,6 +40,16 @@ pub enum CoordinatorEvent {
         conn_id: ConnId,
         direction: Direction,
     },
+    /// Fires as soon as the peer's device id is known, before any
+    /// trust decision — lets the UI offer manual trust
+    /// (`Coordinator::trust_manually`) for peers that never send a
+    /// `pairRequest`, which turns out to include the real
+    /// `entanglo-macos` v0.1.58 — see `session::OutgoingMessage::
+    /// TrustManually`'s doc comment for how that was discovered.
+    PeerIdentified {
+        conn_id: ConnId,
+        device_id: String,
+    },
     PeerHello {
         conn_id: ConnId,
         hello: HelloPayload,
@@ -365,9 +375,14 @@ impl Coordinator {
                         }
                     }
                 }
-                if let SessionEvent::Trusted { ref device_id } = event {
+                let identified_device_id = match &event {
+                    SessionEvent::PeerIdentified { device_id }
+                    | SessionEvent::Trusted { device_id } => Some(device_id.clone()),
+                    _ => None,
+                };
+                if let Some(device_id) = identified_device_id {
                     if let Some(handle) = this.peers.lock().await.get_mut(&conn_id) {
-                        handle.device_id = Some(device_id.clone());
+                        handle.device_id = Some(device_id);
                     }
                 }
                 if matches!(event, SessionEvent::ReleaseControl { .. }) {
@@ -421,6 +436,18 @@ impl Coordinator {
                     .send(OutgoingMessage::ReleaseControl(ReleaseControlPayload {
                         reason: reason.to_string(),
                     }));
+        }
+    }
+
+    /// Manually trusts `conn_id` right now, without a `pairRequest`/
+    /// `pairResponse` round trip — see `session::OutgoingMessage::
+    /// TrustManually`'s doc comment for why this exists (the real Mac
+    /// app doesn't implement that round trip). This is the Devices
+    /// page's "Trust" button for a peer we've said hello to but that
+    /// never sent us a `pairRequest`.
+    pub async fn trust_manually(&self, conn_id: ConnId) {
+        if let Some(handle) = self.peers.lock().await.get(&conn_id) {
+            let _ = handle.outgoing_tx.send(OutgoingMessage::TrustManually);
         }
     }
 
@@ -504,6 +531,9 @@ impl Coordinator {
 
 fn translate(conn_id: ConnId, event: SessionEvent) -> CoordinatorEvent {
     match event {
+        SessionEvent::PeerIdentified { device_id } => {
+            CoordinatorEvent::PeerIdentified { conn_id, device_id }
+        }
         SessionEvent::PeerHello { hello, .. } => CoordinatorEvent::PeerHello { conn_id, hello },
         SessionEvent::PairingRequested {
             request, respond, ..

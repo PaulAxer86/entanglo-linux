@@ -43,6 +43,17 @@ pub struct SessionConfig {
 pub enum OutgoingMessage {
     Input(InputEventMessage),
     ReleaseControl(ReleaseControlPayload),
+    /// Locally trust this peer right now, without waiting for a
+    /// `pairRequest`/`pairResponse` round trip. Exists because the
+    /// real `entanglo-macos` v0.1.58 turns out not to implement that
+    /// round trip at all (confirmed by reading its source: `pairRequest`/
+    /// `pairResponse` are declared in `MessageType` but never sent or
+    /// handled anywhere — `PairingState.swift` calls it "the wire-side
+    /// PIN ceremony lands in 0.2"). Its actual v0.1 trust model is
+    /// "each side decides who to trust from its own local Devices
+    /// list," with no wire negotiation. This variant is our UI's
+    /// equivalent of the Mac's local "Trust" button.
+    TrustManually,
 }
 
 /// What a running session reports to its caller. The caller (UI or a
@@ -51,6 +62,14 @@ pub enum OutgoingMessage {
 /// no UI and no `/dev/uinput` dependency.
 #[derive(Debug)]
 pub enum SessionEvent {
+    /// Fires exactly once per session, as soon as the peer's first
+    /// message reveals its `senderDeviceId` — before any trust
+    /// decision, so the caller can offer a manual "Trust" action
+    /// (`OutgoingMessage::TrustManually`) for peers that never send a
+    /// `pairRequest` (see that variant's doc comment).
+    PeerIdentified {
+        device_id: String,
+    },
     /// The peer's `hello` arrived — carries its self-reported name,
     /// roles, and platform for display before trust is established.
     PeerHello {
@@ -168,6 +187,9 @@ pub async fn run_session(
                     trusted = trust_store.lock().await.is_trusted(&id);
                     peer_device_id = Some(id.clone());
                     tracing::info!(peer_device_id = %id, trusted, "peer identified");
+                    let _ = events_tx.send(SessionEvent::PeerIdentified {
+                        device_id: id.clone(),
+                    });
                     if trusted {
                         let _ = events_tx.send(SessionEvent::Trusted { device_id: id });
                     } else {
@@ -303,14 +325,52 @@ pub async fn run_session(
             }
 
             Some(message) = outgoing_rx.recv() => {
-                if trusted {
-                    match message {
-                        OutgoingMessage::Input(event) => {
-                            send(&mut transport, &config, MessageType::InputEvent, &event).await?;
+                match message {
+                    OutgoingMessage::TrustManually => {
+                        // Deliberately not gated on `trusted` — this
+                        // IS how trust gets granted when the peer
+                        // never sends a pairRequest (see the variant's
+                        // doc comment). No-op if we don't even know
+                        // who the peer is yet (hello hasn't arrived).
+                        if let Some(id) = peer_device_id.clone() {
+                            let mut store = trust_store.lock().await;
+                            store.trust(TrustedDevice {
+                                device_id: id.clone(),
+                                friendly_name: peer_hello
+                                    .as_ref()
+                                    .map(|h| h.device_name.clone())
+                                    .unwrap_or_else(|| id.clone()),
+                                trusted_since_unix: unix_timestamp_now(),
+                            });
+                            if let Err(e) = store.save().await {
+                                tracing::warn!(error = %e, "failed to persist trust store");
+                            }
+                            drop(store);
+                            trusted = true;
+                            tracing::info!(peer_device_id = %id, "trusted manually");
+                            let _ = events_tx.send(SessionEvent::Trusted { device_id: id });
+                            // Forward-compat courtesy for peers that DO
+                            // implement the wire handshake (a future
+                            // entanglo-linux/entanglo-windows on the
+                            // other end) — harmless no-op for the real
+                            // Mac, which ignores this message type.
+                            let response = PairResponsePayload {
+                                accepted: true,
+                                trusted_device_id: None,
+                                rejection_reason: None,
+                            };
+                            let _ = send(&mut transport, &config, MessageType::PairResponse, &response).await;
                         }
-                        OutgoingMessage::ReleaseControl(payload) => {
-                            send(&mut transport, &config, MessageType::ReleaseControl, &payload).await?;
-                        }
+                    }
+                    OutgoingMessage::Input(event) if trusted => {
+                        send(&mut transport, &config, MessageType::InputEvent, &event).await?;
+                    }
+                    OutgoingMessage::ReleaseControl(payload) if trusted => {
+                        send(&mut transport, &config, MessageType::ReleaseControl, &payload).await?;
+                    }
+                    OutgoingMessage::Input(_) | OutgoingMessage::ReleaseControl(_) => {
+                        // Not trusted yet — silently dropped, matching
+                        // the previous `if trusted` guard's behavior.
                     }
                 }
             }
@@ -562,6 +622,121 @@ mod tests {
                 "session sent unexpected traffic after identifying a self-connection: {msg:?}"
             ),
             Ok(Err(_)) | Err(_) => {}
+        }
+    }
+
+    /// Regression coverage for the real interop gap found by reading
+    /// `entanglo-macos`'s actual source: the shipped v0.1.58 app never
+    /// sends or handles `pairRequest`/`pairResponse` (confirmed by
+    /// `grep` across its whole codebase) — its real trust model is
+    /// "each side locally decides who to trust," not a wire
+    /// handshake. This test plays the silent-Mac role directly on the
+    /// raw transport (send `hello`, never reply to the `pairRequest`
+    /// we send back) and checks that `OutgoingMessage::TrustManually`
+    /// still gets us to a working, trusted, input-forwarding link.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_manually_works_against_a_peer_that_never_replies_to_pair_request() {
+        let (our_sock, their_sock) = loopback_pair().await;
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        let config = SessionConfig {
+            local_device_id: "our-device".to_string(),
+            local_session_id: uuid::Uuid::new_v4().to_string(),
+            local_hello: hello("Us"),
+        };
+        tokio::spawn(run_session(
+            NetworkTransport::new(our_sock),
+            config,
+            empty_trust_store().await,
+            events_tx,
+            out_rx,
+        ));
+
+        // Plays the silent Mac: send hello, then never look at
+        // anything else that arrives (in particular, never reply to
+        // the pairRequest that's about to show up).
+        let mut their_side = NetworkTransport::new(their_sock);
+        let hello_msg = EntangloMessage::encode_payload(
+            MessageType::Hello,
+            "mac-device",
+            uuid::Uuid::new_v4().to_string(),
+            &hello("Silent Mac"),
+        )
+        .unwrap();
+        their_side.send(&hello_msg).await.unwrap();
+
+        // We should learn who the peer is immediately, well before
+        // any trust decision.
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+                .await
+                .expect("timed out waiting for PeerIdentified")
+                .expect("event stream closed")
+            {
+                SessionEvent::PeerIdentified { device_id } => {
+                    assert_eq!(device_id, "mac-device");
+                    break;
+                }
+                SessionEvent::Trusted { .. } => {
+                    panic!("trusted before TrustManually was ever sent")
+                }
+                _ => continue,
+            }
+        }
+
+        // The UI's "Trust" button, calling straight into the session
+        // without the peer ever having sent a pairRequest.
+        out_tx.send(OutgoingMessage::TrustManually).unwrap();
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+                .await
+                .expect("timed out waiting for Trusted")
+                .expect("event stream closed")
+            {
+                SessionEvent::Trusted { device_id } => {
+                    assert_eq!(device_id, "mac-device");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // And now real input actually flows — this is the thing that
+        // was broken end to end against the live Mac.
+        let move_event = InputEventMessage {
+            kind: crate::protocol::payloads::input_event::InputEventKind::MouseMove,
+            x: Some(3.0),
+            y: Some(4.0),
+            delta_x: None,
+            delta_y: None,
+            button: None,
+            key_code: None,
+            media_key: None,
+            modifier_flags: 0,
+            pressed: None,
+            click_state: None,
+        };
+        out_tx
+            .send(OutgoingMessage::Input(move_event.clone()))
+            .unwrap();
+
+        loop {
+            let envelope = tokio::time::timeout(Duration::from_secs(5), their_side.recv())
+                .await
+                .expect("timed out waiting for a frame")
+                .expect("transport error");
+            if envelope.message_type == MessageType::InputEvent {
+                let received: InputEventMessage = envelope.decode_payload().unwrap();
+                assert_eq!(received.x, move_event.x);
+                assert_eq!(received.y, move_event.y);
+                break;
+            }
+            // Anything else (the pairRequest sent earlier, the
+            // courtesy pairResponse TrustManually also sends, a
+            // heartbeat) is expected and just not what we're looking
+            // for here.
         }
     }
 }

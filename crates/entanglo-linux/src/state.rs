@@ -124,6 +124,17 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             );
             redraw_devices(shared);
         }
+        CoordinatorEvent::PeerIdentified { conn_id, device_id } => {
+            // Fires before any trust decision — see the doc comment
+            // on `CoordinatorEvent::PeerIdentified`. This is what
+            // makes the "Trust" button below possible for peers
+            // (like the real `entanglo-macos` v0.1.58) that never
+            // send us a `pairRequest`.
+            if let Some(row) = shared.devices.borrow_mut().get_mut(&conn_id) {
+                row.device_id = Some(device_id);
+            }
+            redraw_devices(shared);
+        }
         CoordinatorEvent::PeerHello { conn_id, hello } => {
             if let Some(row) = shared.devices.borrow_mut().get_mut(&conn_id) {
                 row.name = hello.device_name;
@@ -204,12 +215,33 @@ fn redraw_devices(shared: &Rc<AppShared>) {
     for (&conn_id, row) in entries {
         let label_text = match (&row.device_id, row.trusted) {
             (Some(id), true) => format!("{}  ·  {id}  ·  trusted", row.name),
-            (Some(id), false) => format!("{}  ·  {id}  ·  pairing…", row.name),
+            (Some(id), false) => format!("{}  ·  {id}  ·  not yet trusted", row.name),
             (None, _) => format!("{}  ·  connecting…", row.name),
         };
 
         let entry = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         entry.append(&gtk::Label::new(Some(&label_text)));
+
+        if row.device_id.is_some() && !row.trusted {
+            // Manual trust, matching how the real entanglo-macos
+            // v0.1.58 actually works: reading its source shows it
+            // never sends or handles pairRequest/pairResponse at all
+            // (PairingState.swift: "the wire-side PIN ceremony lands
+            // in 0.2") — each side just decides who to trust from its
+            // own local Devices list. A peer that *does* send us a
+            // pairRequest still shows up on the Pairing page as
+            // usual; this button is for the ones that never will.
+            let trust_button = gtk::Button::with_label("Trust");
+            let handle = shared.backend.handle.clone();
+            let coordinator = Arc::clone(&shared.backend.coordinator);
+            trust_button.connect_clicked(move |_| {
+                let coordinator = Arc::clone(&coordinator);
+                handle.spawn(async move {
+                    coordinator.trust_manually(conn_id).await;
+                });
+            });
+            entry.append(&trust_button);
+        }
 
         if row.trusted {
             // Immediate manual fallback for "who am I controlling" —

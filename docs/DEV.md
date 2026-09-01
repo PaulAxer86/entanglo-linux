@@ -83,11 +83,17 @@ have a real desktop session (Xorg via lightdm) and real network access
   it; the resulting trust was written to the real GNOME Keyring via
   Secret Service (not the file fallback) and correctly reloaded,
   still trusted, on a second run of the app.
-- The Mac's `pairRequest` is (as of this writing) still pending real
-  human approval on that machine — it did not auto-trust, which is
-  the *correct* behavior matching the Mac's own pairing UI. If you're
-  picking this scaffold back up: check whether that Mac still has a
-  pending Entanglo pairing prompt, and either approve or dismiss it.
+- The Mac's `pairRequest` sat unanswered — turned out this is not a
+  pending-approval state at all: reading `entanglo-macos`'s actual
+  source shows v0.1.58 **never implements the wire pairRequest/
+  pairResponse handshake** (confirmed by `grep`, zero hits outside the
+  `MessageType` enum declaration). Its real trust model is local-only
+  per side, no network negotiation. See `ROADMAP.md`'s Trust store
+  entry for the full writeup and the fix
+  (`Coordinator::trust_manually`, a "Trust" button on the Devices
+  page). If you're picking this up fresh: there is no Mac-side
+  approval to go find — use the Trust button (or
+  `examples/manual_trust_smoke_test.rs` for a GTK-free check) instead.
 - Found and fixed a real bug this way: mDNS's periodic
   re-announcements were causing the discovery loop to re-dial every
   peer (including this device's own advertisement) repeatedly, which
