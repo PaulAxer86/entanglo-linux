@@ -6,7 +6,7 @@ pub mod trust_store;
 
 pub use coordinator::{ConnId, Coordinator, CoordinatorEvent, Direction};
 pub use discovery::{DiscoveredPeer, DiscoveryService};
-pub use session::{run_session, SessionConfig, SessionEvent};
+pub use session::{run_session, OutgoingMessage, SessionConfig, SessionEvent};
 pub use transport::NetworkTransport;
 pub use trust_store::TrustStore;
 

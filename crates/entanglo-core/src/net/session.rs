@@ -34,6 +34,17 @@ pub struct SessionConfig {
     pub local_hello: HelloPayload,
 }
 
+/// What the caller can push out through a session's outgoing channel.
+/// Started as just `InputEventMessage`; `releaseControl` (Checkpoint D
+/// — local input touched while being controlled, see
+/// `net::coordinator`) needed a second message type on the same
+/// channel rather than a whole separate plumbing path.
+#[derive(Debug)]
+pub enum OutgoingMessage {
+    Input(InputEventMessage),
+    ReleaseControl(ReleaseControlPayload),
+}
+
 /// What a running session reports to its caller. The caller (UI or a
 /// test harness) drives the Devices/Pairing pages and the input
 /// injection safety gates off this stream — `session.rs` itself has
@@ -94,7 +105,7 @@ pub async fn run_session(
     config: SessionConfig,
     trust_store: Arc<Mutex<TrustStore>>,
     events_tx: mpsc::UnboundedSender<SessionEvent>,
-    mut outgoing_input_rx: mpsc::UnboundedReceiver<InputEventMessage>,
+    mut outgoing_rx: mpsc::UnboundedReceiver<OutgoingMessage>,
 ) -> Result<(), SessionError> {
     let start = Instant::now();
     let now_ms = || start.elapsed().as_secs_f64() * 1000.0;
@@ -291,9 +302,16 @@ pub async fn run_session(
                 send(&mut transport, &config, MessageType::Heartbeat, &heartbeat).await?;
             }
 
-            Some(event) = outgoing_input_rx.recv() => {
+            Some(message) = outgoing_rx.recv() => {
                 if trusted {
-                    send(&mut transport, &config, MessageType::InputEvent, &event).await?;
+                    match message {
+                        OutgoingMessage::Input(event) => {
+                            send(&mut transport, &config, MessageType::InputEvent, &event).await?;
+                        }
+                        OutgoingMessage::ReleaseControl(payload) => {
+                            send(&mut transport, &config, MessageType::ReleaseControl, &payload).await?;
+                        }
+                    }
                 }
             }
         }
@@ -451,7 +469,9 @@ mod tests {
             pressed: None,
             click_state: None,
         };
-        client_out_tx.send(move_event.clone()).unwrap();
+        client_out_tx
+            .send(OutgoingMessage::Input(move_event.clone()))
+            .unwrap();
 
         loop {
             match tokio::time::timeout(Duration::from_secs(5), server_relay_rx.recv())

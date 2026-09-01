@@ -21,9 +21,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::input::{InputCaptureService, InputInjectionService};
-use crate::protocol::payloads::{HelloPayload, InputEventMessage, PairRequestPayload};
+use crate::protocol::payloads::{
+    HelloPayload, InputEventMessage, PairRequestPayload, ReleaseControlPayload,
+};
 
-use super::session::{run_session, SessionConfig, SessionEvent};
+use super::session::{run_session, OutgoingMessage, SessionConfig, SessionEvent};
 use super::transport::NetworkTransport;
 use super::trust_store::TrustStore;
 
@@ -79,7 +81,7 @@ pub enum Direction {
 }
 
 struct PeerHandle {
-    outgoing_input_tx: mpsc::UnboundedSender<InputEventMessage>,
+    outgoing_tx: mpsc::UnboundedSender<OutgoingMessage>,
     device_id: Option<String>,
 }
 
@@ -91,9 +93,10 @@ pub struct Coordinator {
     next_conn_id: AtomicU64,
     events_tx: mpsc::UnboundedSender<CoordinatorEvent>,
     /// The peer currently receiving this device's input, if this
-    /// device is acting as controller. Set by the edge-detection /
-    /// hotkey logic (⬜ in `ROADMAP.md` Phase 1 — not implemented
-    /// yet); `send_to_active_receiver` is the hook future work calls.
+    /// device is acting as controller. Real edge-detection is still
+    /// ⬜ (`ROADMAP.md`); today the only setter is the Devices page's
+    /// manual "Control this device" button. Cleared automatically on
+    /// that peer's disconnect, or when it sends us `releaseControl`.
     active_receiver: Mutex<Option<ConnId>>,
     /// `Some` once `enable_receiver` has successfully opened
     /// `/dev/uinput` — every trusted peer's `InputEvent`s are then
@@ -119,6 +122,16 @@ pub struct Coordinator {
     /// incoming `InputEvent`s — see the checks in `send_to_active_receiver`
     /// and the `spawn_peer` relay loop.
     emergency_stopped: std::sync::atomic::AtomicBool,
+    /// The peer whose `InputEvent`s we're currently injecting, if
+    /// any — set on the *first* `InputEvent` from a trusted peer
+    /// while this is `None`, and cleared the instant local hardware
+    /// input is detected (`enable_controller`'s per-device loop).
+    /// That clear is what actually sends `releaseControl` — see the
+    /// checks in `spawn_peer`'s relay loop and in `enable_controller`.
+    /// Single-target by design: Phase 1's goal is "share one mouse +
+    /// keyboard" (`ROADMAP.md`), not arbitrate multiple simultaneous
+    /// controllers.
+    being_controlled_by: Mutex<Option<ConnId>>,
 }
 
 impl Coordinator {
@@ -146,6 +159,7 @@ impl Coordinator {
             controller_enabled: std::sync::atomic::AtomicBool::new(false),
             controller_device_count: std::sync::atomic::AtomicUsize::new(0),
             emergency_stopped: std::sync::atomic::AtomicBool::new(false),
+            being_controlled_by: Mutex::new(None),
         });
         (coordinator, events_rx)
     }
@@ -171,6 +185,24 @@ impl Coordinator {
     /// `InputCaptureService` (behind a mutex) so modifier-key state
     /// stays consistent across e.g. a keyboard and a separate
     /// USB-mouse-with-buttons device.
+    ///
+    /// Two side effects live in this same loop, since it's the one
+    /// place that sees every piece of genuine local hardware input:
+    ///
+    /// - **`releaseControl`** (`PROTOCOL.md` §5.6): any local input at
+    ///   all, while a trusted peer is currently injecting into us
+    ///   (`being_controlled_by.is_some()`), hands control back —
+    ///   clears `being_controlled_by` and notifies that peer. This is
+    ///   `entanglo-macos`'s `LocalInputWatcher` equivalent. Global
+    ///   `Emergency Stop` is a separate, deliberate action
+    ///   (`emergency_stop`/`resume`) — touching your own mouse doesn't
+    ///   need a manual "Resume" click to hand control back next time.
+    /// - **Emergency Stop hotkey**: Ctrl+Shift+Escape toggles
+    ///   `emergency_stop`/`resume` and is consumed here rather than
+    ///   forwarded — this is `ROADMAP.md`'s "global hotkey toggle"
+    ///   fallback for edge-detection (⬜), and unlike a GTK
+    ///   `ShortcutController` it works even when Entanglo's window
+    ///   doesn't have focus, since it's caught at the evdev level.
     pub async fn enable_controller(self: &Arc<Self>) -> std::io::Result<()> {
         let devices = InputCaptureService::enumerate_devices()?;
         self.controller_device_count
@@ -192,9 +224,25 @@ impl Coordinator {
                         }
                     };
                     let translated = capture.lock().await.translate(event);
-                    if let Some(input_event) = translated {
-                        this.send_to_active_receiver(input_event).await;
+                    let Some(input_event) = translated else {
+                        continue;
+                    };
+
+                    if is_emergency_stop_hotkey(&input_event) {
+                        if this.is_emergency_stopped() {
+                            this.resume();
+                        } else {
+                            this.emergency_stop();
+                        }
+                        continue; // consumed, not forwarded
                     }
+
+                    if let Some(controller_conn_id) = this.being_controlled_by.lock().await.take() {
+                        this.send_release_control(controller_conn_id, "local_input")
+                            .await;
+                    }
+
+                    this.send_to_active_receiver(input_event).await;
                 }
             });
         }
@@ -237,13 +285,13 @@ impl Coordinator {
 
     async fn spawn_peer(self: Arc<Self>, socket: TcpStream, direction: Direction) {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
-        let (outgoing_input_tx, outgoing_input_rx) = mpsc::unbounded_channel();
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
         let (session_events_tx, mut session_events_rx) = mpsc::unbounded_channel();
 
         self.peers.lock().await.insert(
             conn_id,
             PeerHandle {
-                outgoing_input_tx,
+                outgoing_tx,
                 device_id: None,
             },
         );
@@ -263,7 +311,7 @@ impl Coordinator {
                 config,
                 trust_store,
                 session_events_tx,
-                outgoing_input_rx,
+                outgoing_rx,
             )
             .await
             {
@@ -283,17 +331,36 @@ impl Coordinator {
                     // `session.rs` already gates InputEvent delivery
                     // on trust — see the `trusted` check in
                     // `run_session`'s receive loop — so anything that
-                    // reaches here is safe to inject. Only actually
-                    // writes to a virtual device if `enable_receiver`
-                    // was called; otherwise this is a no-op and the
-                    // event still reaches the UI below.
-                    if !this
-                        .emergency_stopped
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        if let Some(injector) = this.injector.lock().await.as_mut() {
-                            if let Err(e) = injector.inject(input_event) {
-                                tracing::warn!(error = %e, conn_id, "input injection failed");
+                    // reaches here is from a trusted peer. Two more
+                    // gates before it's safe to inject:
+                    //  - not emergency-stopped, and
+                    //  - this conn_id is the one currently "holding"
+                    //    control (claims it on the first InputEvent
+                    //    seen while nobody else holds it; a second
+                    //    peer can't inject over an active controller
+                    //    — Phase 1 is single-target by design, see
+                    //    `being_controlled_by`'s doc comment).
+                    // `enable_controller`'s local-input detection is
+                    // what releases the claim (`releaseControl`).
+                    // Only actually writes to a virtual device if
+                    // `enable_receiver` was called; otherwise this is
+                    // a no-op and the event still reaches the UI below.
+                    if !this.is_emergency_stopped() {
+                        let mut holder = this.being_controlled_by.lock().await;
+                        let holds_control = match *holder {
+                            None => {
+                                *holder = Some(conn_id);
+                                true
+                            }
+                            Some(existing) => existing == conn_id,
+                        };
+                        drop(holder);
+
+                        if holds_control {
+                            if let Some(injector) = this.injector.lock().await.as_mut() {
+                                if let Err(e) = injector.inject(input_event) {
+                                    tracing::warn!(error = %e, conn_id, "input injection failed");
+                                }
                             }
                         }
                     }
@@ -301,6 +368,17 @@ impl Coordinator {
                 if let SessionEvent::Trusted { ref device_id } = event {
                     if let Some(handle) = this.peers.lock().await.get_mut(&conn_id) {
                         handle.device_id = Some(device_id.clone());
+                    }
+                }
+                if matches!(event, SessionEvent::ReleaseControl { .. }) {
+                    // PROTOCOL.md §5.6: the controller MUST immediately
+                    // stop forwarding inputEvents on releaseControl.
+                    // Only clear if `conn_id` is actually who we were
+                    // controlling — a stray releaseControl from
+                    // someone else is not this peer's business.
+                    let mut active = this.active_receiver.lock().await;
+                    if *active == Some(conn_id) {
+                        *active = None;
                     }
                 }
                 let _ = this.events_tx.send(translate(conn_id, event));
@@ -313,6 +391,12 @@ impl Coordinator {
             if *active == Some(conn_id) {
                 *active = None;
             }
+            drop(active);
+            let mut holder = this.being_controlled_by.lock().await;
+            if *holder == Some(conn_id) {
+                *holder = None;
+            }
+            drop(holder);
             let _ = this.events_tx.send(CoordinatorEvent::PeerDisconnected {
                 conn_id,
                 reason: disconnect_reason,
@@ -322,7 +406,21 @@ impl Coordinator {
 
     pub async fn send_input(&self, conn_id: ConnId, event: InputEventMessage) {
         if let Some(handle) = self.peers.lock().await.get(&conn_id) {
-            let _ = handle.outgoing_input_tx.send(event);
+            let _ = handle.outgoing_tx.send(OutgoingMessage::Input(event));
+        }
+    }
+
+    /// Sends `releaseControl` to `conn_id` — see `PROTOCOL.md` §5.6.
+    /// Called from `enable_controller`'s local-input detection; also
+    /// usable directly (e.g. a future "release control" UI button).
+    pub async fn send_release_control(&self, conn_id: ConnId, reason: &str) {
+        if let Some(handle) = self.peers.lock().await.get(&conn_id) {
+            let _ =
+                handle
+                    .outgoing_tx
+                    .send(OutgoingMessage::ReleaseControl(ReleaseControlPayload {
+                        reason: reason.to_string(),
+                    }));
         }
     }
 
@@ -423,6 +521,18 @@ fn translate(conn_id: ConnId, event: SessionEvent) -> CoordinatorEvent {
         }
         SessionEvent::Closed { reason } => CoordinatorEvent::PeerDisconnected { conn_id, reason },
     }
+}
+
+/// Ctrl+Shift+Escape — the global Emergency Stop toggle,
+/// `ROADMAP.md`'s "hotkey toggle" fallback for edge-detection. Fixed
+/// combo for Phase 1; a Settings-page rebind is future work.
+fn is_emergency_stop_hotkey(event: &InputEventMessage) -> bool {
+    use crate::protocol::payloads::input_event::{modifier_flags, InputEventKind};
+    const MAC_ESCAPE_KEYCODE: u16 = 53;
+    event.kind == InputEventKind::KeyDown
+        && event.key_code == Some(MAC_ESCAPE_KEYCODE)
+        && event.modifier_flags & modifier_flags::SHIFT != 0
+        && event.modifier_flags & modifier_flags::CONTROL != 0
 }
 
 #[cfg(test)]
@@ -622,5 +732,101 @@ mod tests {
                 _ => continue,
             }
         }
+    }
+
+    #[test]
+    fn hotkey_requires_exact_combo() {
+        use crate::protocol::payloads::input_event::{modifier_flags, InputEventKind};
+        let hotkey = |kind, key_code, flags| InputEventMessage {
+            kind,
+            x: None,
+            y: None,
+            delta_x: None,
+            delta_y: None,
+            button: None,
+            key_code,
+            media_key: None,
+            modifier_flags: flags,
+            pressed: Some(true),
+            click_state: None,
+        };
+        let ctrl_shift = modifier_flags::CONTROL | modifier_flags::SHIFT;
+
+        assert!(is_emergency_stop_hotkey(&hotkey(
+            InputEventKind::KeyDown,
+            Some(53),
+            ctrl_shift
+        )));
+        // Plain Escape (no modifiers) must not trigger it — this is
+        // the whole reason it's Ctrl+Shift+Escape and not bare Escape.
+        assert!(!is_emergency_stop_hotkey(&hotkey(
+            InputEventKind::KeyDown,
+            Some(53),
+            0
+        )));
+        // Only one of the two required modifiers.
+        assert!(!is_emergency_stop_hotkey(&hotkey(
+            InputEventKind::KeyDown,
+            Some(53),
+            modifier_flags::CONTROL
+        )));
+        // Right combo, wrong key.
+        assert!(!is_emergency_stop_hotkey(&hotkey(
+            InputEventKind::KeyDown,
+            Some(0),
+            ctrl_shift
+        )));
+        // Right combo, wrong kind (key-up shouldn't re-trigger it).
+        assert!(!is_emergency_stop_hotkey(&hotkey(
+            InputEventKind::KeyUp,
+            Some(53),
+            ctrl_shift
+        )));
+    }
+
+    /// PROTOCOL.md §5.6: receiving `releaseControl` MUST make the
+    /// controller stop forwarding input immediately. Simulates "b
+    /// detected local input" via `send_release_control` directly
+    /// (the evdev-triggered path is exercised live, not by this
+    /// sandboxed test — see ROADMAP.md/docs/DEV.md) and checks the
+    /// effect on a's `active_receiver`, not just that a message went
+    /// out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn release_control_clears_active_receiver_on_controller_side() {
+        let (coordinator_a, coordinator_b, mut relay_a_rx, _relay_b_rx) =
+            paired_coordinators().await;
+
+        let conn_id_on_a = coordinator_a
+            .active_receiver()
+            .await
+            .expect("paired_coordinators leaves a's active_receiver set");
+
+        // `Coordinator` allocates conn ids from 0 per instance, and
+        // `paired_coordinators` gives b exactly one connection (its
+        // one `dial` call) — so that connection is conn_id 0 on b's
+        // side, with no public API needed to look it up.
+        coordinator_b.send_release_control(0, "local_input").await;
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), relay_a_rx.recv())
+                .await
+                .expect("timed out waiting for ReleaseControl")
+                .expect("event stream closed")
+            {
+                CoordinatorEvent::ReleaseControl { conn_id, .. } => {
+                    assert_eq!(conn_id, conn_id_on_a);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // Give the coordinator's own event-handling task a moment to
+        // process the ReleaseControl it just relayed before checking
+        // the side effect (active_receiver is cleared in the same
+        // loop iteration that forwards the event, but from a
+        // different task than this test).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(coordinator_a.active_receiver().await, None);
     }
 }

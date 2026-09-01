@@ -18,6 +18,11 @@ use crate::protocol::payloads::input_event::{InputEventKind, InputEventMessage};
 
 use super::modifiers::ModifierState;
 
+/// Also the filter `input::capture::InputCaptureService::enumerate_devices`
+/// uses to make sure our own virtual device never gets captured back
+/// as local input.
+pub const VIRTUAL_DEVICE_NAME: &str = "Entanglo Virtual Input";
+
 pub struct InputInjectionService {
     device: VirtualDevice,
     modifiers: ModifierState,
@@ -53,7 +58,7 @@ impl InputInjectionService {
         axes.insert(RelativeAxisType::REL_WHEEL);
 
         let device = VirtualDeviceBuilder::new()?
-            .name("Entanglo Virtual Input")
+            .name(VIRTUAL_DEVICE_NAME)
             .with_keys(&keys)?
             .with_relative_axes(&axes)?
             .build()?;

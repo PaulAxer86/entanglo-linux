@@ -102,17 +102,39 @@ live reference implementations, not just loopback-TCP unit tests.
 - ⬜ Cursor edge-detection on the controller — still needs the
   Wayland pointer-position spike from `ROADMAP.md` Risks. The manual
   "Control this device" button (see above) is the interim substitute.
-- 🚧 `releaseControl` on the receiver when local input is touched —
-  the session side (receiving/emitting `SessionEvent::ReleaseControl`)
-  is done; the sending side (detecting local input via evdev and
-  actually calling it) isn't wired up.
-- ✅ Emergency Stop button on the Input Sharing page (matches the
-  Mac's triple-Escape + explicit button) — `Coordinator::
-  emergency_stop`/`resume` gate both directions (own input forwarding
-  *and* incoming injection), tested end to end
-  (`net::coordinator::tests::emergency_stop_blocks_input_until_resumed`).
-  Not yet a *toolbar* button / global hotkey (that's tangled up with
-  ⬜ edge-detection above) — today it's a button on the page.
+- ✅ `releaseControl` on the receiver when local input is touched —
+  both sides now wired: `Coordinator::enable_controller`'s per-device
+  evdev loop sends it the instant *any* real local hardware input
+  occurs while a trusted peer is injecting into us
+  (`being_controlled_by`), and the controller side clears
+  `active_receiver` the instant it receives one, matching `PROTOCOL.md`
+  §5.6's "controller MUST immediately stop forwarding inputEvents".
+  Tested end to end
+  (`net::coordinator::tests::release_control_clears_active_receiver_on_controller_side`).
+  Injection is single-target by construction now: a peer's first
+  `InputEvent` claims `being_controlled_by`, a second peer's
+  `InputEvent`s are ignored until the first releases (matches Phase
+  1's "share one mouse + keyboard" scope, not simultaneous multi-peer
+  control).
+- ✅ Emergency Stop — **global Ctrl+Shift+Escape hotkey**
+  (`Coordinator::enable_controller`'s evdev loop,
+  `is_emergency_stop_hotkey`), reachable even when Entanglo's window
+  doesn't have focus, *plus* the Input Sharing page button — both call
+  the same `emergency_stop`/`resume`, gating both directions (own
+  input forwarding *and* incoming injection). Tested end to end
+  (`net::coordinator::tests::emergency_stop_blocks_input_until_resumed`,
+  `hotkey_requires_exact_combo`).
+
+Also found and fixed two real bugs while wiring this up (not part of
+the original checklist, but load-bearing for "share one mouse"
+actually working): `enumerate_devices` would have captured our own
+`/dev/uinput` virtual device back as "local input" (self-feedback
+loop, and an immediate spurious `releaseControl` the moment control
+was granted) — fixed by name-filtering it out. And mouse button
+clicks were silently dropped by capture — `translate` was looking
+`BTN_LEFT`/`RIGHT`/`MIDDLE` up in the *keyboard* keycode table, which
+doesn't contain them, so cursor movement would have worked but clicks
+never would have. Both covered by new unit tests.
 
 ### Test of done
 

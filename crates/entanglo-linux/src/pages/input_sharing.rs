@@ -3,6 +3,11 @@
 //! Edge-switching itself is still ⬜ (see `ROADMAP.md` Risks) — the
 //! Devices page's manual "Control this device" button is the interim
 //! stand-in for choosing a target.
+//!
+//! Emergency Stop can also be toggled by the global Ctrl+Shift+Escape
+//! hotkey (`net::coordinator::is_emergency_stop_hotkey`), which works
+//! even when this window doesn't have focus — so the button's label
+//! can't just track its own clicks; a short poll keeps it honest.
 
 use std::rc::Rc;
 
@@ -55,6 +60,16 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
             coordinator.emergency_stop();
         }
         refresh(&shared_click, &status_label_click, &stop_button_click);
+    });
+
+    // Picks up the global hotkey toggling emergency-stop while this
+    // page happens to be open — see the module doc comment.
+    let shared_poll = Rc::clone(shared);
+    let status_label_poll = status_label.clone();
+    let stop_button_poll = stop_button.clone();
+    glib::source::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        refresh(&shared_poll, &status_label_poll, &stop_button_poll);
+        glib::ControlFlow::Continue
     });
 
     container.into()
