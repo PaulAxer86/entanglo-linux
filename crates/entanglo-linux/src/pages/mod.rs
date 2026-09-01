@@ -1,7 +1,7 @@
 //! One module per sidebar section, matching the Mac Dashboard's page
 //! set (`entanglo-macos/Entanglo/Views/`) and the Windows `Pages/`
 //! folder in `entanglo-windows/SKELETON.md`. Dashboard/Devices/
-//! Pairing/Input Sharing are wired to live state via
+//! Pairing/Input Sharing/Settings are wired to live state via
 //! `state::AppShared` and `entanglo_core::net::Coordinator`; the rest
 //! are still placeholder `gtk::Widget`s — replace as Phase 1/2 work
 //! lands, per `ROADMAP.md`.
@@ -85,7 +85,7 @@ pub fn build_all(shared: &Rc<AppShared>) -> HashMap<&'static str, gtk::Widget> {
         ("print", print::build()),
         ("network", network::build()),
         ("news-updates", news_updates::build()),
-        ("settings", settings::build()),
+        ("settings", settings::build(shared)),
         ("logs", logs::build()),
     ])
 }

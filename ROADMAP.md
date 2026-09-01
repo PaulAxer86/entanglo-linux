@@ -34,12 +34,16 @@ live reference implementations, not just loopback-TCP unit tests.
   Dashboard/Devices/Pairing/Input Sharing are live, wired to
   `net::session` events through `Coordinator`/`state::AppShared`; the
   other six pages are still placeholders.
-- ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`.
-  ⬜ first-run onboarding that checks `$USER` is in the `input`
-  group and shows the exact `usermod` command — not written yet,
-  needs the Settings page. Today the app just logs a warning and
-  keeps running without receiver/controller capability, confirmed
-  live: `could not open /dev/uinput ... Permission denied`.
+- ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`, and
+  ✅ the "check `$USER` is in the `input` group, show the exact fix"
+  onboarding — as a Settings page section rather than a first-run
+  dialog. It distinguishes two states that live testing showed really
+  do diverge: `/etc/group` says yes but *this running process* still
+  says no (needs a fresh login, group membership is read at login)
+  vs. not in the group at all (needs the `usermod` command, shown
+  verbatim). `pages::settings`'s `/etc/group` parser has its own unit
+  tests (`crates/entanglo-linux` finally has tests, not just
+  `entanglo-core`).
 - ✅ mDNS advertise + browse for `_entanglo._tcp` via `mdns-sd` —
   **live-tested on the real LAN**: advertised successfully, and
   discovered two real peers already running Entanglo — an Android TV
