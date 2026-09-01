@@ -107,7 +107,11 @@ pub struct Coordinator {
     /// ⬜ (`ROADMAP.md`); today the only setter is the Devices page's
     /// manual "Control this device" button. Cleared automatically on
     /// that peer's disconnect, or when it sends us `releaseControl`.
-    active_receiver: Mutex<Option<ConnId>>,
+    // Plain std Mutex, not tokio's — nothing here ever holds this
+    // lock across an `.await`, so a sync lock lets GTK code (the
+    // pointer-grab poll loop in `edge.rs`) read it directly without
+    // needing an async round trip through the backend runtime.
+    active_receiver: std::sync::Mutex<Option<ConnId>>,
     /// `Some` once `enable_receiver` has successfully opened
     /// `/dev/uinput` — every trusted peer's `InputEvent`s are then
     /// injected through it. `None` (the default) means this device
@@ -163,7 +167,7 @@ impl Coordinator {
             peers: Mutex::new(HashMap::new()),
             next_conn_id: AtomicU64::new(0),
             events_tx,
-            active_receiver: Mutex::new(None),
+            active_receiver: std::sync::Mutex::new(None),
             injector: Mutex::new(None),
             receiver_enabled_flag: std::sync::atomic::AtomicBool::new(false),
             controller_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -391,7 +395,7 @@ impl Coordinator {
                     // Only clear if `conn_id` is actually who we were
                     // controlling — a stray releaseControl from
                     // someone else is not this peer's business.
-                    let mut active = this.active_receiver.lock().await;
+                    let mut active = this.active_receiver.lock().unwrap();
                     if *active == Some(conn_id) {
                         *active = None;
                     }
@@ -402,11 +406,12 @@ impl Coordinator {
                 }
             }
             this.peers.lock().await.remove(&conn_id);
-            let mut active = this.active_receiver.lock().await;
-            if *active == Some(conn_id) {
-                *active = None;
+            {
+                let mut active = this.active_receiver.lock().unwrap();
+                if *active == Some(conn_id) {
+                    *active = None;
+                }
             }
-            drop(active);
             let mut holder = this.being_controlled_by.lock().await;
             if *holder == Some(conn_id) {
                 *holder = None;
@@ -457,11 +462,18 @@ impl Coordinator {
     /// `ROADMAP.md` Phase 1; today the only caller is the Devices
     /// page's manual "Control this device" button.
     pub async fn set_active_receiver(&self, conn_id: Option<ConnId>) {
-        *self.active_receiver.lock().await = conn_id;
+        *self.active_receiver.lock().unwrap() = conn_id;
     }
 
     pub async fn active_receiver(&self) -> Option<ConnId> {
-        *self.active_receiver.lock().await
+        *self.active_receiver.lock().unwrap()
+    }
+
+    /// Same as `active_receiver`, but synchronous — for GTK-thread
+    /// polling (`edge.rs`'s pointer-grab loop) that can't await the
+    /// backend runtime on every 50 ms tick without real overhead.
+    pub fn active_receiver_sync(&self) -> Option<ConnId> {
+        *self.active_receiver.lock().unwrap()
     }
 
     /// Forwards one input event to whichever peer `set_active_receiver`
@@ -474,7 +486,13 @@ impl Coordinator {
         {
             return;
         }
-        if let Some(conn_id) = *self.active_receiver.lock().await {
+        // Copy the target out and let the guard drop *before* the
+        // `.await` below — `if let Some(x) = *mutex.lock().unwrap() {
+        // ...await... }` would extend the temporary guard's lifetime
+        // across the whole body per Rust's "if let" temporary rules,
+        // holding a `!Send` std MutexGuard across an await point.
+        let target = *self.active_receiver.lock().unwrap();
+        if let Some(conn_id) = target {
             self.send_input(conn_id, event).await;
         }
     }

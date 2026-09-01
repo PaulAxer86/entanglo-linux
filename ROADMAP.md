@@ -133,17 +133,31 @@ live reference implementations, not just loopback-TCP unit tests.
   silently unavailable there, same as before; the manual "Control
   this device" button keeps working everywhere regardless. Config UI
   is a per-device dropdown on the Devices page (No edge / Left edge /
-  Right edge). **Known rough edge**: no pointer grab/warp — pushing
-  the cursor to the assigned edge starts forwarding input to that
-  peer, but the local cursor keeps moving/clamping normally rather
-  than visually "handing off." Getting control back relies on the
-  peer touching their own input (`releaseControl`) or the local
-  Ctrl+Shift+Escape hotkey — both already work, so this isn't a dead
-  end, just not polished. Debounce logic unit tested
-  (`edge::tests`); the actual `XQueryPointer` round trip needs a real
-  X11 session to exercise, confirmed live on this machine (a genuine
-  X11 desktop, not the Wayland session this was originally scoped
-  assuming).
+  Right edge). **The "no pointer grab" rough edge is fixed**: this
+  was flagged as a known gap, then actually observed live — pushing
+  the cursor to Android's assigned edge correctly started forwarding
+  input, but the local cursor visibly kept moving too (capture reads
+  raw evdev independently of X11, so of course it did). `edge.rs` now
+  grabs the pointer (`XGrabPointer`) with an invisible 1×1 cursor
+  whenever `Coordinator::active_receiver_sync()` is `Some` — checked
+  each 50 ms poll tick, so it also engages for the manual "Control
+  this device" button, not just true edge crossings — and ungrabs the
+  instant it goes back to `None` (peer sends `releaseControl`, the
+  Ctrl+Shift+Escape hotkey, or that peer disconnects). No window
+  confinement, since the physical/logical cursor position isn't what
+  we forward anyway (relative evdev deltas are) — just visibility and
+  local-app event delivery. Required switching `Coordinator::
+  active_receiver` from a `tokio::sync::Mutex` to a plain `std::sync::
+  Mutex` so the GTK poll loop can read it without an async round trip
+  through the backend runtime; caught a real `!Send`-future compile
+  error from this along the way (a std `MutexGuard` held across a
+  `tokio::sync::Mutex`'s `.await` inside the same async block —
+  `drop()` didn't satisfy the borrow checker's Send analysis, an
+  explicit `{ }` scope did). Debounce logic and the edge-boundary math
+  are unit tested (`edge::tests`); the `XGrabPointer`/`XQueryPointer`
+  calls themselves need a real X11 session to exercise, confirmed
+  live on this machine (a genuine X11 desktop, not the Wayland
+  session this was originally scoped assuming).
 - ✅ `releaseControl` on the receiver when local input is touched —
   both sides now wired: `Coordinator::enable_controller`'s per-device
   evdev loop sends it the instant *any* real local hardware input

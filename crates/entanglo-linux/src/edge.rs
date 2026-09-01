@@ -8,23 +8,25 @@
 //!
 //! Polls rather than subscribes to motion events — `XQueryPointer` is
 //! a cheap local round trip, and polling means no X11 event mask /
-//! grab is needed on any window, so this can't interfere with normal
-//! use of the desktop.
+//! grab is needed on any window just to *watch* the cursor, so this
+//! can't interfere with normal use of the desktop by itself. The
+//! separate pointer *grab* below (while a peer is actively being
+//! controlled) very much does intercept local input by design — see
+//! its own doc comment.
 //!
-//! **Known rough edge, not yet fixed**: this does not grab or warp
-//! the local pointer. Pushing the cursor to the assigned edge starts
-//! forwarding input to that peer (`Coordinator::set_active_receiver`),
-//! but the local cursor itself keeps moving/clamping normally — it
-//! doesn't "hand off" visually the way a polished KVM switch would.
-//! Getting control back today relies on the peer touching *their*
-//! input (`releaseControl`, Checkpoint D) or the local
-//! Ctrl+Shift+Escape Emergency Stop hotkey — both already work.
+//! Same poll loop also owns the local-cursor grab/hide while a peer
+//! is being controlled — confirmed live to be needed: pushing the
+//! cursor to an assigned edge correctly started forwarding input to
+//! the peer (Android), but the local cursor kept visibly moving too,
+//! since capture reads raw evdev independently of whatever X11 does
+//! with the same physical mouse. `grab_pointer` + an invisible cursor
+//! fixes that.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::ConnectionExt;
+use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode};
 use x11rb::rust_connection::RustConnection;
 
 use entanglo_core::net::ConnId;
@@ -58,6 +60,14 @@ pub struct EdgeWatcher {
     /// `screen_width - 1`, so "held at the edge" reads as the same
     /// value on every poll until the user pulls back).
     was_at_edge: Option<ScreenEdge>,
+    /// A fully transparent 1×1 cursor, created once and reused for
+    /// every grab — X11 cursors are cheap server-side resources, no
+    /// need to recreate per grab/ungrab cycle.
+    invisible_cursor: u32,
+    /// Whether we currently hold the pointer grab — tracked locally
+    /// so the poll loop only calls `grab`/`ungrab` on an actual
+    /// transition, not every tick.
+    grabbed: bool,
 }
 
 impl EdgeWatcher {
@@ -73,12 +83,43 @@ impl EdgeWatcher {
             }
         };
         let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+
+        let invisible_cursor = match Self::create_invisible_cursor(&conn, root) {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to create an invisible X11 cursor, pointer grab unavailable");
+                return None;
+            }
+        };
+
         Some(Self {
-            root: screen.root,
+            root,
             screen_width: screen.width_in_pixels as i16,
             conn,
             was_at_edge: None,
+            invisible_cursor,
+            grabbed: false,
         })
+    }
+
+    /// A 1×1 fully-transparent cursor: a 1-bit depth pixmap used as
+    /// both the cursor's source and mask, left all-zero, so nothing
+    /// ever gets drawn. Standard X11 technique for "hide the cursor"
+    /// (there's no direct `XHideCursor` in core X11).
+    fn create_invisible_cursor(
+        conn: &RustConnection,
+        root: u32,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
+        let pixmap = conn.generate_id()?;
+        conn.create_pixmap(1, pixmap, root, 1, 1)?.check()?;
+        let cursor = conn.generate_id()?;
+        conn.create_cursor(cursor, pixmap, pixmap, 0, 0, 0, 0, 0, 0, 0, 0)?
+            .check()?;
+        // The cursor keeps its own reference to the pixmap's bitmap
+        // data; safe to free our handle to it once the cursor exists.
+        conn.free_pixmap(pixmap)?.check()?;
+        Ok(cursor)
     }
 
     /// Returns `Some(edge)` the moment the cursor arrives at an edge
@@ -93,6 +134,62 @@ impl EdgeWatcher {
         };
         self.was_at_edge = at_edge;
         crossed
+    }
+
+    /// Grabs the pointer with an invisible cursor and no window
+    /// confinement — the physical cursor position still moves (we
+    /// read it via raw evdev regardless, unaffected by any of this),
+    /// but it's no longer *visible*, and local apps stop receiving
+    /// its clicks/motion while a peer is being controlled, matching
+    /// what a KVM switch is expected to feel like. Idempotent.
+    pub fn grab(&mut self) {
+        if self.grabbed {
+            return;
+        }
+        let event_mask = EventMask::POINTER_MOTION
+            | EventMask::BUTTON_PRESS
+            | EventMask::BUTTON_RELEASE
+            | EventMask::BUTTON_MOTION;
+        let cookie = match self.conn.grab_pointer(
+            false,
+            self.root,
+            event_mask,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            x11rb::NONE, // no confine_to — see module doc comment
+            self.invisible_cursor,
+            x11rb::CURRENT_TIME,
+        ) {
+            Ok(cookie) => cookie,
+            Err(e) => {
+                tracing::warn!(error = %e, "XGrabPointer request failed to send");
+                return;
+            }
+        };
+        match cookie.reply() {
+            Ok(_reply) => {
+                self.grabbed = true;
+                tracing::info!("pointer grabbed (local cursor hidden while controlling a peer)");
+            }
+            Err(e) => tracing::warn!(error = %e, "XGrabPointer failed"),
+        }
+    }
+
+    /// Idempotent.
+    pub fn ungrab(&mut self) {
+        if !self.grabbed {
+            return;
+        }
+        match self.conn.ungrab_pointer(x11rb::CURRENT_TIME) {
+            Ok(cookie) => {
+                if let Err(e) = cookie.check() {
+                    tracing::warn!(error = %e, "XUngrabPointer failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "XUngrabPointer request failed to send"),
+        }
+        self.grabbed = false;
+        tracing::info!("pointer released (local cursor visible again)");
     }
 }
 
@@ -122,6 +219,14 @@ pub fn start(shared: &Rc<AppShared>) {
             if let Some(conn_id) = shared.conn_id_for_edge(edge) {
                 activate(&shared, conn_id);
             }
+        }
+        // Grab/ungrab tracks `active_receiver` directly rather than
+        // only the edge event above, so it also engages when the
+        // Devices page's manual "Control this device" button sets it.
+        if shared.backend.coordinator.active_receiver_sync().is_some() {
+            watcher.grab();
+        } else {
+            watcher.ungrab();
         }
         glib::ControlFlow::Continue
     });
