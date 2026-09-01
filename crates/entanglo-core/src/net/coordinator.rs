@@ -102,6 +102,23 @@ pub struct Coordinator {
     /// `CoordinatorEvent`, it just never writes them to a virtual
     /// device — the safe default until a caller opts in.
     injector: Mutex<Option<InputInjectionService>>,
+    /// Mirrors "`injector` is `Some`" as a plain atomic so UI code can
+    /// check receiver status synchronously (`receiver_enabled`)
+    /// without an async lock, from any thread.
+    receiver_enabled_flag: std::sync::atomic::AtomicBool,
+    /// Set once `enable_controller` has successfully enumerated and
+    /// started reading local input devices. Doesn't mean any device
+    /// was actually found — see `controller_device_count`.
+    controller_enabled: std::sync::atomic::AtomicBool,
+    controller_device_count: std::sync::atomic::AtomicUsize,
+    /// The Input Sharing page's Emergency Stop, per `ROADMAP.md`
+    /// Phase 1 ("matches the Mac's triple-Escape + explicit button").
+    /// While set, both directions of input sharing are inert: this
+    /// device stops forwarding its own captured input to
+    /// `active_receiver`, *and* stops injecting a trusted peer's
+    /// incoming `InputEvent`s — see the checks in `send_to_active_receiver`
+    /// and the `spawn_peer` relay loop.
+    emergency_stopped: std::sync::atomic::AtomicBool,
 }
 
 impl Coordinator {
@@ -125,6 +142,10 @@ impl Coordinator {
             events_tx,
             active_receiver: Mutex::new(None),
             injector: Mutex::new(None),
+            receiver_enabled_flag: std::sync::atomic::AtomicBool::new(false),
+            controller_enabled: std::sync::atomic::AtomicBool::new(false),
+            controller_device_count: std::sync::atomic::AtomicUsize::new(0),
+            emergency_stopped: std::sync::atomic::AtomicBool::new(false),
         });
         (coordinator, events_rx)
     }
@@ -138,6 +159,8 @@ impl Coordinator {
     pub async fn enable_receiver(&self) -> Result<(), crate::input::inject::InjectionError> {
         let injector = InputInjectionService::open()?;
         *self.injector.lock().await = Some(injector);
+        self.receiver_enabled_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -150,6 +173,10 @@ impl Coordinator {
     /// USB-mouse-with-buttons device.
     pub async fn enable_controller(self: &Arc<Self>) -> std::io::Result<()> {
         let devices = InputCaptureService::enumerate_devices()?;
+        self.controller_device_count
+            .store(devices.len(), std::sync::atomic::Ordering::Relaxed);
+        self.controller_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let capture = Arc::new(Mutex::new(InputCaptureService::new()));
         for device in devices {
             let mut stream = device.into_event_stream()?;
@@ -260,9 +287,14 @@ impl Coordinator {
                     // writes to a virtual device if `enable_receiver`
                     // was called; otherwise this is a no-op and the
                     // event still reaches the UI below.
-                    if let Some(injector) = this.injector.lock().await.as_mut() {
-                        if let Err(e) = injector.inject(input_event) {
-                            tracing::warn!(error = %e, conn_id, "input injection failed");
+                    if !this
+                        .emergency_stopped
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        if let Some(injector) = this.injector.lock().await.as_mut() {
+                            if let Err(e) = injector.inject(input_event) {
+                                tracing::warn!(error = %e, conn_id, "input injection failed");
+                            }
                         }
                     }
                 }
@@ -297,17 +329,69 @@ impl Coordinator {
     /// Sets which connection this device is currently controlling (if
     /// acting as controller). `None` clears it. The edge-detection /
     /// hotkey logic that decides *when* to call this is ⬜ in
-    /// `ROADMAP.md` Phase 1 — this method is the hook for it.
+    /// `ROADMAP.md` Phase 1; today the only caller is the Devices
+    /// page's manual "Control this device" button.
     pub async fn set_active_receiver(&self, conn_id: Option<ConnId>) {
         *self.active_receiver.lock().await = conn_id;
     }
 
+    pub async fn active_receiver(&self) -> Option<ConnId> {
+        *self.active_receiver.lock().await
+    }
+
     /// Forwards one input event to whichever peer `set_active_receiver`
-    /// last selected, if any. No-op if nothing is currently targeted.
+    /// last selected, if any. No-op if nothing is currently targeted,
+    /// or while `emergency_stop` is active.
     pub async fn send_to_active_receiver(&self, event: InputEventMessage) {
+        if self
+            .emergency_stopped
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
         if let Some(conn_id) = *self.active_receiver.lock().await {
             self.send_input(conn_id, event).await;
         }
+    }
+
+    /// Input Sharing page's Emergency Stop — matches the Mac's
+    /// triple-Escape + explicit button (`ROADMAP.md` Phase 1). Halts
+    /// both directions immediately: this device stops forwarding its
+    /// own input to `active_receiver`, and stops injecting any
+    /// trusted peer's incoming `InputEvent`s. Does **not** clear
+    /// `active_receiver` or disconnect anyone — it's a pause, not a
+    /// teardown; `resume` lifts it with everything else unchanged.
+    pub fn emergency_stop(&self) {
+        self.emergency_stopped
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn resume(&self) {
+        self.emergency_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_emergency_stopped(&self) -> bool {
+        self.emergency_stopped
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether `enable_receiver` successfully opened `/dev/uinput`.
+    pub fn receiver_enabled(&self) -> bool {
+        self.receiver_enabled_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `(enabled, device_count)` from the last `enable_controller`
+    /// call. `enabled` can be true with a `device_count` of 0 (evdev
+    /// enumeration succeeded but found no keyboard/pointer devices).
+    pub fn controller_status(&self) -> (bool, usize) {
+        (
+            self.controller_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.controller_device_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     pub async fn known_device_ids(&self) -> Vec<String> {
@@ -400,14 +484,32 @@ mod tests {
         }
     }
 
-    /// Two full `Coordinator`s — one listening, one dialing — pair
-    /// with each other over real loopback TCP, and an input event
-    /// sent via `set_active_receiver` + `send_to_active_receiver`
-    /// arrives on the other side. This is the multi-peer management
-    /// layer `session.rs`'s own test doesn't cover: listener/accept,
-    /// dial, and the conn-id-keyed peer map.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn two_coordinators_connect_and_forward_input() {
+    fn sample_move_event(x: f64, y: f64) -> InputEventMessage {
+        InputEventMessage {
+            kind: InputEventKind::MouseMove,
+            x: Some(x),
+            y: Some(y),
+            delta_x: None,
+            delta_y: None,
+            button: None,
+            key_code: None,
+            media_key: None,
+            modifier_flags: 0,
+            pressed: None,
+            click_state: None,
+        }
+    }
+
+    /// Two full `Coordinator`s — one listening, one dialing — dialed,
+    /// auto-paired over real loopback TCP, with `a`'s active receiver
+    /// already set to `b`. Returns both coordinators and each side's
+    /// relayed (non-pairing) event stream.
+    async fn paired_coordinators() -> (
+        Arc<Coordinator>,
+        Arc<Coordinator>,
+        mpsc::UnboundedReceiver<CoordinatorEvent>,
+        mpsc::UnboundedReceiver<CoordinatorEvent>,
+    ) {
         let (coordinator_a, events_a) =
             Coordinator::new("device-a".into(), hello("A"), empty_trust_store().await);
         let (coordinator_b, events_b) =
@@ -430,21 +532,21 @@ mod tests {
 
         let conn_id_on_a = wait_for_trusted(&mut relay_a_rx).await;
         let _conn_id_on_b = wait_for_trusted(&mut relay_b_rx).await;
-
         coordinator_a.set_active_receiver(Some(conn_id_on_a)).await;
-        let move_event = InputEventMessage {
-            kind: InputEventKind::MouseMove,
-            x: Some(42.0),
-            y: Some(7.0),
-            delta_x: None,
-            delta_y: None,
-            button: None,
-            key_code: None,
-            media_key: None,
-            modifier_flags: 0,
-            pressed: None,
-            click_state: None,
-        };
+
+        (coordinator_a, coordinator_b, relay_a_rx, relay_b_rx)
+    }
+
+    /// This is the multi-peer management layer `session.rs`'s own
+    /// test doesn't cover: listener/accept, dial, and the
+    /// conn-id-keyed peer map, exercised end to end over real
+    /// loopback TCP.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_coordinators_connect_and_forward_input() {
+        let (coordinator_a, coordinator_b, _relay_a_rx, mut relay_b_rx) =
+            paired_coordinators().await;
+
+        let move_event = sample_move_event(42.0, 7.0);
         coordinator_a
             .send_to_active_receiver(move_event.clone())
             .await;
@@ -466,5 +568,59 @@ mod tests {
 
         assert_eq!(coordinator_a.known_device_ids().await, vec!["device-b"]);
         assert_eq!(coordinator_b.known_device_ids().await, vec!["device-a"]);
+    }
+
+    /// Emergency Stop (`ROADMAP.md` Phase 1, "matches the Mac's
+    /// triple-Escape + explicit button") must actually stop input
+    /// from flowing, and `resume` must let it flow again — this is
+    /// the one safety-critical UI action in the whole app, so it gets
+    /// its own test rather than relying on `Coordinator::emergency_stop`
+    /// only ever being checked by inspection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emergency_stop_blocks_input_until_resumed() {
+        let (coordinator_a, _coordinator_b, _relay_a_rx, mut relay_b_rx) =
+            paired_coordinators().await;
+
+        coordinator_a.emergency_stop();
+        assert!(coordinator_a.is_emergency_stopped());
+        coordinator_a
+            .send_to_active_receiver(sample_move_event(1.0, 1.0))
+            .await;
+        // Drain whatever's already queued (e.g. a second `Trusted`
+        // event — both sides pairing each other simultaneously, since
+        // neither trusted the other yet, means each side's `Trusted`
+        // can fire twice: once handling the peer's `pairRequest`,
+        // once handling the peer's `pairResponse` to its own) without
+        // treating that as "input leaked while stopped" — only an
+        // actual `InputEvent` counts as a failure here.
+        loop {
+            match tokio::time::timeout(Duration::from_millis(200), relay_b_rx.recv()).await {
+                Ok(Some(CoordinatorEvent::InputEvent { .. })) => {
+                    panic!("an InputEvent was forwarded while emergency-stopped")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        coordinator_a.resume();
+        assert!(!coordinator_a.is_emergency_stopped());
+        let resumed_event = sample_move_event(2.0, 2.0);
+        coordinator_a
+            .send_to_active_receiver(resumed_event.clone())
+            .await;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), relay_b_rx.recv())
+                .await
+                .expect("timed out waiting for InputEvent after resume")
+                .expect("event stream closed")
+            {
+                CoordinatorEvent::InputEvent { event, .. } => {
+                    assert_eq!(event.x, resumed_event.x);
+                    break;
+                }
+                _ => continue,
+            }
+        }
     }
 }

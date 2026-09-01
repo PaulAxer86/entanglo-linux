@@ -31,9 +31,9 @@ live reference implementations, not just loopback-TCP unit tests.
 - ✅ GTK4/libadwaita app shell: `AdwNavigationSplitView` with all ten
   pages, sidebar navigation, and a **real window that opens on a real
   X11 display** — confirmed via `xwininfo`, not just `cargo build`.
-  Dashboard/Devices/Pairing are live, wired to `net::session` events
-  through `Coordinator`/`state::AppShared`; the other seven pages are
-  still placeholders.
+  Dashboard/Devices/Pairing/Input Sharing are live, wired to
+  `net::session` events through `Coordinator`/`state::AppShared`; the
+  other six pages are still placeholders.
 - ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`.
   ⬜ first-run onboarding that checks `$USER` is in the `input`
   group and shows the exact `usermod` command — not written yet,
@@ -80,19 +80,21 @@ live reference implementations, not just loopback-TCP unit tests.
   exchanges above (heartbeats would need a longer live run than this
   pass did, to avoid leaving connections open against real peers
   longer than necessary).
-- 🚧 `inputEvent` send (evdev capture) and receive (`/dev/uinput`
-  injection) — `Coordinator::enable_controller`/`enable_receiver` are
-  wired end to end into the connection lifecycle (an incoming trusted
-  peer's `InputEvent` is injected automatically; local evdev devices
-  are captured and forwarded to whichever peer
-  `set_active_receiver` targets, with a manual "Control this device"
-  button on the Devices page as the stand-in for real edge-detection).
-  Confirmed live that this **fails safely**: no `input` group
-  membership on this run, so `enable_receiver` logged a permission
-  error and the app kept running with receiver capability simply
-  off — no crash, no partial/unsafe state. Not yet confirmed with
-  `input` group membership actually granted (that's an environment
-  change, not a code change, for whoever runs this next).
+- ✅ `inputEvent` send (evdev capture) and receive (`/dev/uinput`
+  injection) — `Coordinator::enable_controller`/`enable_receiver` wired
+  end to end into the connection lifecycle. **Verified at the kernel
+  level, not just compiled**: with the `input` group granted and the
+  `uinput` kernel module loaded (`sudo modprobe uinput` — not loaded
+  by default on this machine; the `.deb`'s udev rule only applies once
+  a node exists), `enable_receiver` opened `/dev/uinput` and
+  `/proc/bus/input/devices` showed a real registered
+  `"Entanglo Virtual Input"` device with the full keyboard + mouse
+  capability set. `enable_controller` opened `/dev/input/event*`
+  without error under the same permissions. What's still unverified:
+  actually driving the cursor/keys of a *paired* peer through this
+  path end to end — that needs a completed pairing (still pending
+  human approval on the real Mac) to exercise, not just the
+  capture/inject mechanism in isolation.
 - ⬜ Cursor edge-detection on the controller — still needs the
   Wayland pointer-position spike from `ROADMAP.md` Risks. The manual
   "Control this device" button (see above) is the interim substitute.
@@ -100,9 +102,13 @@ live reference implementations, not just loopback-TCP unit tests.
   the session side (receiving/emitting `SessionEvent::ReleaseControl`)
   is done; the sending side (detecting local input via evdev and
   actually calling it) isn't wired up.
-- ⬜ Emergency stop button in the toolbar (matches the Mac's
-  triple-Escape + explicit button). Not started — needs the Input
-  Sharing page.
+- ✅ Emergency Stop button on the Input Sharing page (matches the
+  Mac's triple-Escape + explicit button) — `Coordinator::
+  emergency_stop`/`resume` gate both directions (own input forwarding
+  *and* incoming injection), tested end to end
+  (`net::coordinator::tests::emergency_stop_blocks_input_until_resumed`).
+  Not yet a *toolbar* button / global hotkey (that's tangled up with
+  ⬜ edge-detection above) — today it's a button on the page.
 
 ### Test of done
 
