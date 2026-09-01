@@ -1,0 +1,35 @@
+[package]
+name = "entanglo-linux"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Entanglo — GTK4/libadwaita app shell for Debian."
+default-run = "entanglo-linux"
+
+[[bin]]
+name = "entanglo-linux"
+path = "src/main.rs"
+
+[dependencies]
+entanglo-core = { path = "../entanglo-core" }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_10"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_4"] }
+glib = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+
+[package.metadata.deb]
+maintainer = "Paolo Asara <paolo.asara86@gmail.com>"
+copyright = "2026, Paolo Asara"
+depends = "$auto, libgtk-4-1, libadwaita-1-0"
+section = "net"
+priority = "optional"
+maintainer-scripts = "../../packaging"
+assets = [
+    ["target/release/entanglo-linux", "usr/bin/", "755"],
+    ["data/com.paoloasara.Entanglo.desktop", "usr/share/applications/", "644"],
+    ["data/com.paoloasara.Entanglo.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/60-entanglo-uinput.rules", "lib/udev/rules.d/", "644"],
+]

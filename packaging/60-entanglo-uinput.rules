@@ -1,0 +1,9 @@
+# Lets a process in the `input` group open /dev/uinput without root.
+# See ROADMAP.md Phase 1 and STACK.md — this is what makes desktop
+# Debian simpler than entanglo-android's rooted-TV-box uinput helper.
+#
+# Installed to /etc/udev/rules.d/ by the .deb postinst script.
+# After install, add yourself to the group and re-login:
+#   sudo usermod -aG input $USER
+
+KERNEL=="uinput", GROUP="input", MODE="0660"

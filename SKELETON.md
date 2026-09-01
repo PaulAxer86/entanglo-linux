@@ -135,7 +135,6 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 mdns-sd = "0.11"
 evdev = "0.12"
-uinput = "0.1"
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 thiserror = "1"
 tracing = "0.1"
@@ -249,17 +248,29 @@ while let Ok(ev) = events.next_event().await {
 the app's lifetime — same long-lived-fd pattern as
 `entanglo-android`'s root helper, just without the root/IPC layer
 since desktop Debian lets an `input`-group process open the node
-directly:
+directly. No separate `uinput` crate needed — `evdev`'s own `uinput`
+module builds the virtual device using the same `Key`/
+`RelativeAxisType` types as capture:
 
 ```rust
-let mut device = uinput::default()?
-    .name("Entanglo Virtual Input")?
-    .event(uinput::event::Keyboard::All)?
-    .event(uinput::event::Controller::All)?
-    .event(uinput::event::relative::Position::X)?
-    .event(uinput::event::relative::Position::Y)?
-    .create()?;
+use evdev::{uinput::VirtualDeviceBuilder, AttributeSet, Key, RelativeAxisType};
+
+let mut keys = AttributeSet::<Key>::new();
+keys.insert(Key::KEY_A); // ...one insert per key in keymap.rs's table
+
+let mut axes = AttributeSet::<RelativeAxisType>::new();
+axes.insert(RelativeAxisType::REL_X);
+axes.insert(RelativeAxisType::REL_Y);
+
+let mut device = VirtualDeviceBuilder::new()?
+    .name("Entanglo Virtual Input")
+    .with_keys(&keys)?
+    .with_relative_axes(&axes)?
+    .build()?;
 ```
+
+(Verified against `evdev` 0.12.2 — `cargo check -p entanglo-core`
+passes clean with this shape as of this scaffold's initial commit.)
 
 ### First test to write
 

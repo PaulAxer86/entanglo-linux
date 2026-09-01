@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.paoloasara.Entanglo</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>Entanglo</name>
+  <summary>Share mouse, keyboard, clipboard and files with trusted devices on your LAN</summary>
+  <description>
+    <p>
+      Entanglo connects Mac, Windows, Android and Linux devices on the
+      same Wi-Fi with a shared mouse and keyboard, clipboard sync,
+      chunked file transfer, and a printer bridge. No cloud service —
+      fully peer-to-peer, LAN-only.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.paoloasara.Entanglo.desktop</launchable>
+  <url type="homepage">https://entanglo.pages.dev</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-09-01">
+      <description>
+        <p>Initial Debian scaffolding — protocol, transport, and app shell.</p>
+      </description>
+    </release>
+  </releases>
+</component>

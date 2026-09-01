@@ -1,0 +1,20 @@
+#!/bin/sh
+# cargo-deb maintainer script: installs the udev rule and reloads
+# udev so /dev/uinput picks up the new GROUP/MODE without a reboot.
+# See ROADMAP.md Phase 1 and packaging/60-entanglo-uinput.rules.
+set -e
+
+if [ -x /usr/bin/udevadm ] || [ -x /sbin/udevadm ]; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=misc --attr-match=name=uinput || true
+fi
+
+cat <<'EOF'
+Entanglo installed. To use input sharing, add yourself to the
+'input' group and log out/in once:
+
+    sudo usermod -aG input $USER
+
+EOF
+
+exit 0

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/entanglo-core", "crates/entanglo-linux"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Paolo Asara"]
+license = "UNLICENSED"
+repository = "https://github.com/PaulAxer86/entanglo-linux"
+
+[profile.release]
+lto = true
+strip = true

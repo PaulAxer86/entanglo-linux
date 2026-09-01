@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Entanglo
+Comment=Share mouse, keyboard, clipboard and files with trusted devices on your LAN
+Exec=entanglo-linux
+Icon=com.paoloasara.Entanglo
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=true

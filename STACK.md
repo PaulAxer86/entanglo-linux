@@ -16,7 +16,7 @@ by default (GNOME) as the visual reference for the easy part (UI).
 | TCP transport | `NWConnection` | `tokio::net::TcpStream` + `tokio_util::codec::Framed` | Idiomatic async Rust, and `LengthDelimitedCodec` gives the 4-byte-BE framing almost for free. |
 | JSON | Swift `Codable` | **`serde` + `serde_json`** | The de-facto standard; mirror Swift's base64-for-`Data` behaviour explicitly (see `PROTOCOL.md` §3) with a custom `serde_with::base64::Base64` field. |
 | Input capture | CGEvent tap | **raw `/dev/input/eventX` (evdev)** via the `evdev` (or `input-linux`) crate | Bypasses X11/Wayland entirely — works unmodified whether the session is GNOME/Wayland, GNOME/X11, KDE/Wayland, or a bare console. This is the same layer `entanglo-android`'s C `uinput.c` already operates at. |
-| Input injection | `CGEventPost` | **`/dev/uinput`** via the `uinput` (or hand-rolled `libc` ioctl) crate | Same reasoning as capture: a virtual kernel input device is seen identically by every display server. No root needed on desktop Debian — see permissions note below. |
+| Input injection | `CGEventPost` | **`/dev/uinput`** via the same `evdev` crate's `uinput` module (`VirtualDeviceBuilder`) | Same reasoning as capture, and shares the exact `Key`/`RelativeAxisType` code space with the capture side — no separate `uinput` crate needed. No root needed on desktop Debian — see permissions note below. |
 | Modifier flags | CGEventFlags | Track modifier `KEY_*` state manually from evdev; synthesize on injection | evdev has no bitmask concept — see `PROTOCOL.md` §5.5 for the translation rule. |
 | Clipboard sync | `NSPasteboard` | **`arboard`** crate | Cross-platform clipboard crate with working Wayland support (shells out to `wl-clipboard` semantics internally) and X11 support (via `x11rb`). Text first, image after, matching the Mac's own rollout order. |
 | Screen capture | `SCScreenshotManager` | **`ashpd`** crate → `org.freedesktop.portal.Screenshot` | Works on GNOME/Wayland and KDE/Wayland via the desktop portal, with a user consent dialog (unavoidable and correct — Wayland deliberately has no unprompted screen capture). X11 fallback via `x11rb` `GetImage` for portal-less sessions. |
@@ -101,7 +101,8 @@ very little visual translation — same story as the Windows
   means *Flutter's* look, not GNOME's — same objection as Electron,
   just compiled instead of web-rendered.
 
-The chosen stack (Rust + GTK4/libadwaita + raw evdev/uinput) is the
+The chosen stack (Rust + GTK4/libadwaita + the `evdev` crate for both
+raw evdev capture and its own `uinput` injection module) is the
 **shortest path to a Debian app that doesn't feel like a port**, and
 is the first client to actually stand up the shared `entanglo-core`
 Rust crate the Mac roadmap has been planning toward since 0.1.

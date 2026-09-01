@@ -1,0 +1,29 @@
+[package]
+name = "entanglo-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-agnostic Entanglo protocol, transport, and Linux input core (no UI)."
+
+[dependencies]
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+mdns-sd = "0.11"
+evdev = "0.12"
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
