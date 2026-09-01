@@ -17,7 +17,7 @@ serde_json = "1"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 mdns-sd = "0.11"
-evdev = "0.12"
+evdev = { version = "0.12", features = ["tokio"] }
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 thiserror = "1"
 anyhow = "1"
@@ -26,6 +26,7 @@ sha2 = "0.10"
 hex = "0.4"
 aes-gcm = "0.10"
 hkdf = "0.12"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

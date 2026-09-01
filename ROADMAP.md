@@ -18,62 +18,84 @@ else.
 
 ### Deliverables
 
-Status legend: ✅ done + tested, 🚧 written but not exercised against
-real hardware/display, ⬜ not started. See `docs/DEV.md` for exactly
-what "tested" means for each ✅ item — mostly loopback-TCP integration
-tests, since this scaffold was built on a machine with no display
-server and no `/dev/input`/`/dev/uinput` access of its own.
+Status legend: ✅ done + tested, 🚧 written but not fully exercised,
+⬜ not started. See `docs/DEV.md` for what "tested" means per item —
+this scaffold turned out to be built on an actual Debian desktop
+(real X11 session, real LAN with a real Mac and Android running
+Entanglo already), so several items below are verified against those
+live reference implementations, not just loopback-TCP unit tests.
 
 - ✅ Cargo workspace with `entanglo-core` (protocol + transport + input
   translation, no UI) and `entanglo-linux` (GTK4 app) crates — see
   `SKELETON.md`.
-- 🚧 GTK4/libadwaita app shell: `AdwNavigationSplitView` with all ten
-  pages present and sidebar navigation wired up, but every page is
-  still a placeholder — none has its real UI or is wired to
-  `net::session` events yet.
-- ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`:
-  ```
-  KERNEL=="uinput", GROUP="input", MODE="0660"
-  ```
+- ✅ GTK4/libadwaita app shell: `AdwNavigationSplitView` with all ten
+  pages, sidebar navigation, and a **real window that opens on a real
+  X11 display** — confirmed via `xwininfo`, not just `cargo build`.
+  Dashboard/Devices/Pairing are live, wired to `net::session` events
+  through `Coordinator`/`state::AppShared`; the other seven pages are
+  still placeholders.
+- ✅ `udev` rule shipped in `packaging/60-entanglo-uinput.rules`.
   ⬜ first-run onboarding that checks `$USER` is in the `input`
-  group and, if not, shows the exact `usermod` command to run (never
-  auto-elevates — same posture as the Mac's permission model, see
-  `entanglo-macos/docs/PERMISSIONS.md`) — not written yet, needs the
-  Settings page.
-- 🚧 mDNS advertise + browse for `_entanglo._tcp` via `mdns-sd` —
-  written, compiles, not exercised (would need two machines on a real
-  LAN or a loopback mDNS setup neither of which this pass covers).
+  group and shows the exact `usermod` command — not written yet,
+  needs the Settings page. Today the app just logs a warning and
+  keeps running without receiver/controller capability, confirmed
+  live: `could not open /dev/uinput ... Permission denied`.
+- ✅ mDNS advertise + browse for `_entanglo._tcp` via `mdns-sd` —
+  **live-tested on the real LAN**: advertised successfully, and
+  discovered two real peers already running Entanglo — an Android TV
+  box and a Mac (`iMac Pro (2)`, app `0.1.58`). Found and fixed a real
+  bug this way: mDNS re-announces trigger repeat discovery of the same
+  service (including our own advertisement), which was dialing peers
+  — and re-sending `pairRequest` to a human-gated peer like the Mac —
+  over and over. Fixed with a per-service dial dedup in
+  `app_state::spawn_discovery` and a self-connection guard in
+  `session::run_session` (see `net::session::tests::
+  self_connection_is_rejected_before_pairing`).
 - ✅ TCP listener on an OS-assigned port + outbound `TcpStream`, via
-  `tokio` — exercised directly by the session integration test.
+  `tokio` — exercised by the session/coordinator integration tests
+  *and* by real inbound/outbound connections to the Android/Mac peers.
 - ✅ Wire framing (4-byte big-endian length prefix + JSON envelope) via
   `tokio_util::codec::Framed` + a custom codec.
 - ✅ All payload structs (`#[derive(Serialize, Deserialize)]`) per
   `PROTOCOL.md` §5.
-- ✅ `hello` handshake, both directions — `net::session::run_session`,
-  covered by `net::session::tests::two_peers_pair_and_forward_input`.
-- ✅ Trust store (Secret Service, fallback encrypted file) + Pairing UX
-  state machine (approve/reject incoming `pairRequest` via a
-  `SessionEvent::PairingRequested` + oneshot-channel callback) —
-  `net::trust_store` + `net::session`. The Secret Service path itself
-  is untested here (no D-Bus session on this machine); the file
-  fallback's encrypt/decrypt roundtrip is. 🚧 The GTK **Pairing page**
-  that would actually call the callback from a user click doesn't
-  exist yet — still a `Label` placeholder.
-- ✅ Heartbeats (1 Hz) with RTT echo per §5.4 — same integration test
-  exercises at least one heartbeat round trip.
-- 🚧 `inputEvent` send (evdev capture from `/dev/input/eventX`) and
-  receive (`/dev/uinput` injection), with the keycode table from
-  `PROTOCOL.md` §7 and the modifier-state translation from §5.5 —
-  `input::capture`/`input::inject` compile against real `evdev` APIs
-  and the keymap/modifier logic has unit tests, but neither has run
-  against an actual `/dev/input`/`/dev/uinput` device yet, and neither
-  is wired to `net::session`'s `InputEvent`/outgoing-input channel.
-- ⬜ Cursor edge-detection on the controller (mirror the Mac's
-  "push past the edge → take over peer" UX) — needs the current
-  pointer position, which on Wayland means reading it back out of the
-  compositor via the portal or a compositor-specific protocol
-  extension; on X11 it's a plain `XQueryPointer`. Flag this as the
-  single trickiest Phase 1 item — see Risks below. Not started.
+- ✅ `hello` handshake, both directions — verified against the real
+  Mac and Android apps live, not just the loopback test: logs show
+  `hello received device_name="iMac Pro (2)" platform=Some("macOS")
+  app_version=0.1.58` and the equivalent for the Android box.
+- ✅ Trust store (Secret Service, fallback encrypted file) + pairing —
+  **verified live against the real Secret Service** (GNOME Keyring,
+  not just the file-fallback unit tests): a `pairRequest` sent to the
+  Android box came back accepted, trust was written to the real
+  keyring, and a second run of the app loaded that same trust from
+  disk-backed Secret Service storage and skipped pairing entirely.
+  The Mac correctly did **not** auto-trust — its `pairRequest` is
+  still pending real human approval on that machine, matching the
+  Mac's own human-approval pairing UI. ✅ GTK **Pairing page** exists
+  and is wired to `SessionEvent::PairingRequested` with real
+  Accept/Reject buttons (`state.rs`), though clicking them hasn't
+  been exercised in this pass (would need a *local* incoming
+  pairRequest, which didn't happen to occur live).
+- ✅ Heartbeats (1 Hz) with RTT echo per §5.4 — integration-tested;
+  live behavior not separately confirmed beyond the successful hello
+  exchanges above (heartbeats would need a longer live run than this
+  pass did, to avoid leaving connections open against real peers
+  longer than necessary).
+- 🚧 `inputEvent` send (evdev capture) and receive (`/dev/uinput`
+  injection) — `Coordinator::enable_controller`/`enable_receiver` are
+  wired end to end into the connection lifecycle (an incoming trusted
+  peer's `InputEvent` is injected automatically; local evdev devices
+  are captured and forwarded to whichever peer
+  `set_active_receiver` targets, with a manual "Control this device"
+  button on the Devices page as the stand-in for real edge-detection).
+  Confirmed live that this **fails safely**: no `input` group
+  membership on this run, so `enable_receiver` logged a permission
+  error and the app kept running with receiver capability simply
+  off — no crash, no partial/unsafe state. Not yet confirmed with
+  `input` group membership actually granted (that's an environment
+  change, not a code change, for whoever runs this next).
+- ⬜ Cursor edge-detection on the controller — still needs the
+  Wayland pointer-position spike from `ROADMAP.md` Risks. The manual
+  "Control this device" button (see above) is the interim substitute.
 - 🚧 `releaseControl` on the receiver when local input is touched —
   the session side (receiving/emitting `SessionEvent::ReleaseControl`)
   is done; the sending side (detecting local input via evdev and

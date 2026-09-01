@@ -1,8 +1,12 @@
 //! One module per sidebar section, matching the Mac Dashboard's page
 //! set (`entanglo-macos/Entanglo/Views/`) and the Windows `Pages/`
-//! folder in `entanglo-windows/SKELETON.md`. Each `build()` returns a
-//! placeholder `gtk::Widget` today — replace with the real page UI as
-//! Phase 1/2 work lands, per `ROADMAP.md`.
+//! folder in `entanglo-windows/SKELETON.md`. Dashboard/Devices/Pairing
+//! are wired to live `entanglo_core::net::CoordinatorEvent`s via
+//! `state::AppShared`; the rest are still placeholder `gtk::Widget`s
+//! — replace as Phase 1/2 work lands, per `ROADMAP.md`.
+
+use std::collections::HashMap;
+use std::rc::Rc;
 
 pub mod dashboard;
 pub mod devices;
@@ -14,6 +18,8 @@ pub mod news_updates;
 pub mod pairing;
 pub mod print;
 pub mod settings;
+
+use crate::state::AppShared;
 
 pub struct PageInfo {
     pub id: &'static str,
@@ -63,20 +69,22 @@ pub const ALL_PAGES: &[PageInfo] = &[
     },
 ];
 
-/// Dispatch by `PageInfo::id` to the matching page's placeholder
-/// widget. `window.rs` calls this when a sidebar row is selected.
-pub fn build_by_id(id: &str) -> gtk::Widget {
-    match id {
-        "dashboard" => dashboard::build(),
-        "devices" => devices::build(),
-        "pairing" => pairing::build(),
-        "input-sharing" => input_sharing::build(),
-        "files" => files::build(),
-        "print" => print::build(),
-        "network" => network::build(),
-        "news-updates" => news_updates::build(),
-        "settings" => settings::build(),
-        "logs" => logs::build(),
-        _ => unreachable!("unknown page id {id:?} — add it to ALL_PAGES"),
-    }
+/// Builds every page's widget once, up front. `window.rs` keeps this
+/// map alive for the app's lifetime and just swaps which widget is
+/// shown on sidebar selection — building fresh widgets per click
+/// (the earlier design) would lose Devices/Pairing state, and miss
+/// live updates, whenever the user wasn't looking at that page.
+pub fn build_all(shared: &Rc<AppShared>) -> HashMap<&'static str, gtk::Widget> {
+    HashMap::from([
+        ("dashboard", dashboard::build(shared)),
+        ("devices", devices::build(shared)),
+        ("pairing", pairing::build(shared)),
+        ("input-sharing", input_sharing::build()),
+        ("files", files::build()),
+        ("print", print::build()),
+        ("network", network::build()),
+        ("news-updates", news_updates::build()),
+        ("settings", settings::build()),
+        ("logs", logs::build()),
+    ])
 }

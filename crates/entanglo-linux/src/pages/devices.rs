@@ -1,11 +1,17 @@
 //! Discovered + trusted peer list, mirroring `entanglo-macos`'s
-//! `DevicesView`. Phase 1, see `ROADMAP.md`.
+//! `DevicesView`. Phase 1, see `ROADMAP.md`. Live-updated from
+//! `CoordinatorEvent`s via `state::handle_event` — see `state.rs`.
 
-use gtk::{Label, Widget};
+use std::rc::Rc;
 
-pub fn build() -> Widget {
-    Label::builder()
-        .label("Devices — discovered + trusted peers (Phase 1)")
+use gtk::{ScrolledWindow, Widget};
+
+use crate::state::AppShared;
+
+pub fn build(shared: &Rc<AppShared>) -> Widget {
+    ScrolledWindow::builder()
+        .child(&shared.devices_list)
+        .vexpand(true)
         .build()
         .into()
 }

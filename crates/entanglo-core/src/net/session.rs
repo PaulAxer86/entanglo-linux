@@ -142,8 +142,21 @@ pub async fn run_session(
 
                 if peer_device_id.is_none() {
                     let id = msg.sender_device_id.clone();
+                    if id == config.local_device_id {
+                        // mDNS discovers our own advertisement too (it's
+                        // just another `_entanglo._tcp` service on the
+                        // LAN from its point of view), and the discovery
+                        // loop has no way to know an address is "us"
+                        // before dialing it — so this shows up as a real
+                        // TCP connection. Bail out before pairing with
+                        // ourselves.
+                        tracing::debug!("dropping self-connection (discovered our own mDNS advertisement)");
+                        let _ = events_tx.send(SessionEvent::Closed { reason: "self-connection".into() });
+                        return Ok(());
+                    }
                     trusted = trust_store.lock().await.is_trusted(&id);
                     peer_device_id = Some(id.clone());
+                    tracing::info!(peer_device_id = %id, trusted, "peer identified");
                     if trusted {
                         let _ = events_tx.send(SessionEvent::Trusted { device_id: id });
                     } else {
@@ -160,12 +173,20 @@ pub async fn run_session(
                 match msg.message_type {
                     MessageType::Hello => {
                         if let Ok(hello) = msg.decode_payload::<HelloPayload>() {
+                            tracing::info!(
+                                peer_device_id = %peer_id,
+                                device_name = %hello.device_name,
+                                platform = ?hello.platform,
+                                app_version = %hello.app_version,
+                                "hello received"
+                            );
                             peer_hello = Some(hello.clone());
                             let _ = events_tx.send(SessionEvent::PeerHello { device_id: peer_id, hello });
                         }
                     }
                     MessageType::PairRequest => {
                         if let Ok(request) = msg.decode_payload::<PairRequestPayload>() {
+                            tracing::info!(peer_device_id = %peer_id, requester_name = %request.requester_device_name, "pairRequest received");
                             let friendly_name = request.requester_device_name.clone();
                             let (respond_tx, respond_rx) = oneshot::channel();
                             let _ = events_tx.send(SessionEvent::PairingRequested {
@@ -191,6 +212,7 @@ pub async fn run_session(
                                 trusted_device_id: accepted.then(|| peer_id.clone()),
                                 rejection_reason: (!accepted).then(|| "rejected by user".to_string()),
                             };
+                            tracing::info!(peer_device_id = %peer_id, accepted, "pairRequest answered");
                             send(&mut transport, &config, MessageType::PairResponse, &response).await?;
                             let _ = events_tx.send(if accepted {
                                 SessionEvent::Trusted { device_id: peer_id }
@@ -201,6 +223,7 @@ pub async fn run_session(
                     }
                     MessageType::PairResponse => {
                         if let Ok(response) = msg.decode_payload::<PairResponsePayload>() {
+                            tracing::info!(peer_device_id = %peer_id, accepted = response.accepted, "pairResponse received");
                             if response.accepted {
                                 let friendly_name = peer_hello
                                     .as_ref()
@@ -443,6 +466,82 @@ mod tests {
                 }
                 _ => continue,
             }
+        }
+    }
+
+    /// Regression test for a real bug found during live testing on a
+    /// LAN with actual peers: mDNS discovers a device's own
+    /// advertisement (it's indistinguishable from any other
+    /// `_entanglo._tcp` service to the browser), so the discovery
+    /// layer can end up dialing itself. Without this guard that opens
+    /// a session against itself and — since a device never trusts its
+    /// own id — sends itself a real `pairRequest`. Assert the session
+    /// recognizes its own `senderDeviceId` and closes immediately
+    /// instead of proceeding to pairing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_connection_is_rejected_before_pairing() {
+        let (client_sock, server_sock) = loopback_pair().await;
+        let shared_device_id = "same-device-both-ends";
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (_out_tx, out_rx) = mpsc::unbounded_channel();
+        let config = SessionConfig {
+            local_device_id: shared_device_id.to_string(),
+            local_session_id: uuid::Uuid::new_v4().to_string(),
+            local_hello: hello("Self"),
+        };
+        tokio::spawn(run_session(
+            NetworkTransport::new(client_sock),
+            config,
+            empty_trust_store().await,
+            events_tx,
+            out_rx,
+        ));
+
+        // The other end of the loopback pair, standing in for "the
+        // same device's other connection" without needing a second
+        // full Coordinator — just drive the raw transport enough to
+        // trigger the guard by sending a `hello` with the same id.
+        let mut other_side = NetworkTransport::new(server_sock);
+
+        // `run_session` sends its own `hello` unconditionally as the
+        // very first thing it does, before it can know anything about
+        // who it's talking to — drain that expected frame first so
+        // the "no further traffic" check below isn't tripped by it.
+        let first = tokio::time::timeout(Duration::from_secs(5), other_side.recv())
+            .await
+            .expect("timed out waiting for the session's own hello")
+            .expect("failed to decode the session's own hello");
+        assert_eq!(first.message_type, MessageType::Hello);
+
+        let hello_msg = EntangloMessage::encode_payload(
+            MessageType::Hello,
+            shared_device_id,
+            uuid::Uuid::new_v4().to_string(),
+            &hello("Self"),
+        )
+        .unwrap();
+        other_side.send(&hello_msg).await.unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("timed out waiting for a session event")
+            .expect("event stream closed")
+        {
+            SessionEvent::Closed { reason } => assert_eq!(reason, "self-connection"),
+            other => panic!("expected Closed{{self-connection}}, got {other:?}"),
+        }
+
+        // In particular, no `pairRequest` should ever have been sent.
+        // The session closing its socket on the way out (a normal
+        // `TransportError::Closed`, or the outer timeout elapsing if
+        // the OS hasn't delivered the FIN yet) both mean "no further
+        // message" — only an actually-decoded frame is a failure.
+        match tokio::time::timeout(Duration::from_millis(200), other_side.recv()).await {
+            Ok(Ok(msg)) => panic!(
+                "session sent unexpected traffic after identifying a self-connection: {msg:?}"
+            ),
+            Ok(Err(_)) | Err(_) => {}
         }
     }
 }
