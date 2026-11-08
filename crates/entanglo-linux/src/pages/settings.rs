@@ -9,14 +9,15 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{Label, Orientation, Widget};
 
+use super::layout;
 use crate::state::AppShared;
 
 pub fn build(shared: &Rc<AppShared>) -> Widget {
     let container = gtk::Box::new(Orientation::Vertical, 8);
-    container.set_margin_top(16);
-    container.set_margin_bottom(16);
-    container.set_margin_start(16);
-    container.set_margin_end(16);
+    container.set_margin_top(18);
+    container.set_margin_bottom(18);
+    container.set_margin_start(18);
+    container.set_margin_end(18);
 
     let username = current_username();
     let in_group_config = username
@@ -74,6 +75,29 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
 
     container.append(&gtk::Separator::new(Orientation::Horizontal));
 
+    let clipboard_heading = Label::new(Some("Clipboard"));
+    clipboard_heading.set_halign(gtk::Align::Start);
+    clipboard_heading.add_css_class("heading");
+    container.append(&clipboard_heading);
+
+    let clipboard_toggle = gtk::CheckButton::with_label("Sync plain text with trusted devices");
+    clipboard_toggle.set_active(shared.clipboard.enabled());
+    let shared_clipboard = Rc::clone(shared);
+    clipboard_toggle.connect_toggled(move |toggle| {
+        shared_clipboard.clipboard.set_enabled(toggle.is_active());
+    });
+    container.append(&clipboard_toggle);
+
+    let clipboard_note = Label::new(Some(
+        "Off by default. Only plain text is shared, only with trusted peers, up to 1 MiB.",
+    ));
+    clipboard_note.set_halign(gtk::Align::Start);
+    clipboard_note.set_wrap(true);
+    clipboard_note.add_css_class("dim-label");
+    container.append(&clipboard_note);
+
+    container.append(&gtk::Separator::new(Orientation::Horizontal));
+
     let identity_label = Label::new(Some(&format!(
         "Device id: {}",
         shared.backend.local_device_id
@@ -82,7 +106,19 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
     identity_label.set_selectable(true);
     container.append(&identity_label);
 
-    container.into()
+    let card = gtk::Box::new(Orientation::Vertical, 0);
+    card.add_css_class("card");
+    card.set_margin_top(4);
+    card.set_margin_bottom(4);
+    card.set_margin_start(4);
+    card.set_margin_end(4);
+    card.append(&container);
+
+    layout::page(
+        "Settings",
+        "Local permissions, clipboard sync and device identity.",
+        &card,
+    )
 }
 
 fn current_username() -> Option<String> {

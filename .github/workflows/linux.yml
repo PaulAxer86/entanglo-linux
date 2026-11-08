@@ -1,0 +1,48 @@
+name: Linux test, package and release
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:13
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+    steps:
+      - name: Install Debian build dependencies
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates curl cargo rustc build-essential pkg-config python3 libgtk-4-dev libadwaita-1-dev libudev-dev xdg-user-dirs
+      - uses: actions/checkout@v4
+      - name: Test
+        run: cargo test --locked --workspace -- --test-threads=1
+      - name: Build release package
+        run: |
+          cargo build --locked --release -p entanglo-linux
+          python3 scripts/package-debian.py --binary target/release/entanglo-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: entanglo-linux-amd64
+          path: |
+            dist/*.deb
+            dist/SHA256SUMS
+            dist/INSTALL.txt
+            dist/install-entanglo.sh
+      - name: Publish versioned release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: python3 scripts/publish-github-release.py

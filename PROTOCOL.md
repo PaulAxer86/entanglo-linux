@@ -152,7 +152,9 @@ Sent immediately after the TCP connect, before any other traffic.
   "deviceModel": "Linux",
   "appVersion": "0.1.0",
   "roles": ["controller", "receiver"],
-  "platform": "Linux"
+  "platform": "Linux",
+  "screenWidth": 2560,
+  "screenHeight": 1440
 }
 ```
 
@@ -161,6 +163,13 @@ Sent immediately after the TCP connect, before any other traffic.
 `platform` is optional. Coarse OS identifier — `"macOS"`,
 `"Windows"`, `"Linux"`, … — so peers can branch on OS without parsing
 `deviceModel`. The Linux client MUST send `"Linux"`.
+
+`screenWidth` and `screenHeight` are optional positive integers describing
+the main display's coordinate space used by absolute pointer events. They must
+be supplied together. A controller SHOULD use these values for cursor seeding
+and clamping; when either field is absent or invalid it MUST use its documented
+legacy fallback. The fields are optional so releases such as macOS 0.1.58
+continue to interoperate.
 
 ### 5.2 `PairRequestPayload`
 

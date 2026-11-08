@@ -94,10 +94,16 @@ pub fn init() -> LogBuffer {
         .with_writer(RingBufferMakeWriter(buffer.clone()))
         .with_ansi(false);
 
+    let file_layer = std::env::var_os("ENTANGLO_LOG_FILE")
+        .and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok())
+        .map(|file| tracing_subscriber::fmt::layer()
+            .with_writer(std::sync::Mutex::new(file)).with_ansi(false));
+
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(stderr_layer)
         .with(buffer_layer)
+        .with(file_layer)
         .try_init();
 
     buffer

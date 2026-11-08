@@ -1,12 +1,19 @@
 #!/bin/sh
-# cargo-deb maintainer script: installs the udev rule and reloads
-# udev so /dev/uinput picks up the new GROUP/MODE without a reboot.
+# cargo-deb maintainer script: loads uinput, reloads the installed
+# udev rule, and reapplies it so /dev/uinput gets GROUP/MODE without
+# a reboot. The modules-load.d file makes the same state persistent.
 # See ROADMAP.md Phase 1 and packaging/60-entanglo-uinput.rules.
 set -e
 
+if command -v modprobe >/dev/null 2>&1; then
+    modprobe uinput || true
+elif [ -x /usr/sbin/modprobe ]; then
+    /usr/sbin/modprobe uinput || true
+fi
+
 if [ -x /usr/bin/udevadm ] || [ -x /sbin/udevadm ]; then
     udevadm control --reload-rules || true
-    udevadm trigger --subsystem-match=misc --attr-match=name=uinput || true
+    udevadm trigger --action=change --sysname-match=uinput || true
 fi
 
 cat <<'EOF'

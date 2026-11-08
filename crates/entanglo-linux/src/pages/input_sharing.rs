@@ -14,14 +14,16 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{Label, Orientation, Widget};
 
+use super::layout;
 use crate::state::AppShared;
 
 pub fn build(shared: &Rc<AppShared>) -> Widget {
-    let container = gtk::Box::new(Orientation::Vertical, 8);
-    container.set_margin_top(16);
-    container.set_margin_bottom(16);
-    container.set_margin_start(16);
-    container.set_margin_end(16);
+    let container = gtk::Box::new(Orientation::Vertical, 12);
+    container.add_css_class("card");
+    container.set_margin_top(4);
+    container.set_margin_bottom(4);
+    container.set_margin_start(4);
+    container.set_margin_end(4);
 
     let (controller_enabled, device_count) = shared.backend.coordinator.controller_status();
     let controller_label = Label::new(Some(&if controller_enabled {
@@ -30,6 +32,9 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
         "Controller: unavailable — check 'input' group membership".to_string()
     }));
     controller_label.set_halign(gtk::Align::Start);
+    controller_label.set_margin_top(16);
+    controller_label.set_margin_start(16);
+    controller_label.set_margin_end(16);
     container.append(&controller_label);
 
     let receiver_label = Label::new(Some(&if shared.backend.coordinator.receiver_enabled() {
@@ -38,13 +43,21 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
         "Receiver: unavailable — check 'input' group membership".to_string()
     }));
     receiver_label.set_halign(gtk::Align::Start);
+    receiver_label.set_margin_start(16);
+    receiver_label.set_margin_end(16);
     container.append(&receiver_label);
 
     let status_label = Label::new(None);
     status_label.set_halign(gtk::Align::Start);
+    status_label.set_margin_start(16);
+    status_label.set_margin_end(16);
     container.append(&status_label);
 
     let stop_button = gtk::Button::new();
+    stop_button.set_halign(gtk::Align::Start);
+    stop_button.set_margin_start(16);
+    stop_button.set_margin_end(16);
+    stop_button.set_margin_bottom(16);
     container.append(&stop_button);
 
     refresh(shared, &status_label, &stop_button);
@@ -72,7 +85,11 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
         glib::ControlFlow::Continue
     });
 
-    container.into()
+    layout::page(
+        "Input Sharing",
+        "View mouse and keyboard sharing status and stop remote control immediately.",
+        &container,
+    )
 }
 
 fn refresh(shared: &Rc<AppShared>, status_label: &Label, stop_button: &gtk::Button) {

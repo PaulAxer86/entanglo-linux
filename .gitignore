@@ -2,3 +2,8 @@
 **/*.rs.bk
 *.deb
 .DS_Store
+
+/dist/
+/entanglo-linux-*.tar.gz
+__pycache__/
+*.pyc

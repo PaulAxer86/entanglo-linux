@@ -391,7 +391,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
 name = "entanglo-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -401,6 +401,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "libc",
  "mdns-sd",
  "secret-service",
  "serde",
@@ -412,17 +413,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x11rb",
 ]
 
 [[package]]
 name = "entanglo-linux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel",
  "entanglo-core",
  "glib",
  "gtk4",
  "libadwaita",
+ "libc",
  "tokio",
  "tracing",
  "uuid",

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::features::clipboard::ClipboardSyncService;
 use crate::input::{InputCaptureService, InputInjectionService};
 use crate::protocol::payloads::{
     HelloPayload, InputEventMessage, PairRequestPayload, ReleaseControlPayload,
@@ -31,14 +32,118 @@ use super::trust_store::TrustStore;
 
 pub type ConnId = u64;
 
+/// Edge of the remote screen through which control entered. Crossing
+/// the local left edge enters the remote screen from its right edge,
+/// and vice versa. Only that same remote edge returns control locally,
+/// matching `entanglo-macos`'s anti-loop behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteEntryEdge {
+    Left,
+    Right,
+}
+
+const FALLBACK_REMOTE_SCREEN_WIDTH: f64 = 2560.0;
+const FALLBACK_REMOTE_SCREEN_HEIGHT: f64 = 1440.0;
+
+#[derive(Debug)]
+struct RemoteCursorState {
+    conn_id: ConnId,
+    entry_edge: RemoteEntryEdge,
+    x: f64,
+    y: f64,
+    screen_width: f64,
+    screen_height: f64,
+    buttons_held: u8,
+}
+
+impl RemoteCursorState {
+    fn new(
+        conn_id: ConnId,
+        entry_edge: RemoteEntryEdge,
+        screen_width: f64,
+        screen_height: f64,
+    ) -> Self {
+        let x = match entry_edge {
+            RemoteEntryEdge::Left => 0.0,
+            RemoteEntryEdge::Right => screen_width - 1.0,
+        };
+        Self {
+            conn_id,
+            entry_edge,
+            x,
+            y: screen_height / 2.0,
+            screen_width,
+            screen_height,
+            buttons_held: 0,
+        }
+    }
+
+    /// Updates the sender-side virtual cursor. Returns true when it
+    /// crosses back out through the same edge it entered from. The
+    /// opposite edge is a wall, preventing an immediate two-machine
+    /// bounce loop. Do not return during a drag: releasing control
+    /// mid-drag can leave a mouse button logically held on the peer.
+    fn observe(&mut self, event: &mut InputEventMessage) -> bool {
+        use crate::protocol::payloads::input_event::InputEventKind;
+
+        match event.kind {
+            InputEventKind::MouseDown => {
+                if let Some(button) = event.button.filter(|button| *button < 8) {
+                    self.buttons_held |= 1 << button;
+                }
+                return false;
+            }
+            InputEventKind::MouseUp => {
+                if let Some(button) = event.button.filter(|button| *button < 8) {
+                    self.buttons_held &= !(1 << button);
+                }
+                return false;
+            }
+            InputEventKind::MouseMove => {
+                self.x += event.delta_x.unwrap_or(0.0);
+                self.y += event.delta_y.unwrap_or(0.0);
+            }
+            _ => return false,
+        }
+
+        if self.buttons_held == 0 {
+            match self.entry_edge {
+                RemoteEntryEdge::Left if self.x < 0.0 => return true,
+                RemoteEntryEdge::Right if self.x >= self.screen_width => return true,
+                _ => {}
+            }
+        }
+
+        self.x = self.x.clamp(0.0, self.screen_width - 1.0);
+        self.y = self.y.clamp(0.0, self.screen_height - 1.0);
+        // macOS uses absolute coordinates when present. Sending our
+        // sender-side virtual cursor makes the pointer enter at the
+        // physical adjoining edge instead of continuing from the
+        // receiver's stale cursor position (its relative fallback).
+        event.x = Some(self.x);
+        event.y = Some(self.y);
+        event.delta_x = None;
+        event.delta_y = None;
+        false
+    }
+}
+
+fn peer_screen_size(hello: &HelloPayload) -> Option<(f64, f64)> {
+    hello.screen_size()
+}
+
 /// What the coordinator reports, one connection at a time. Same
 /// shape as `SessionEvent` with a `conn_id` attached so the caller
 /// can tell peers apart before any of them have a known device id.
 #[derive(Debug)]
 pub enum CoordinatorEvent {
+    PeerDiscovered(super::discovery::DiscoveredPeer),
+    PeerDiscoveryRemoved(String),
     PeerConnected {
         conn_id: ConnId,
         direction: Direction,
+        local_addr: Option<SocketAddr>,
+        peer_addr: Option<SocketAddr>,
     },
     /// Fires as soon as the peer's device id is known, before any
     /// trust decision — lets the UI offer manual trust
@@ -74,6 +179,14 @@ pub enum CoordinatorEvent {
         conn_id: ConnId,
         event: InputEventMessage,
     },
+    ClipboardText {
+        conn_id: ConnId,
+        text: String,
+    },
+    FileTransfer {
+        conn_id: ConnId,
+        progress: crate::features::file_transfer::FileProgress,
+    },
     ReleaseControl {
         conn_id: ConnId,
         reason: String,
@@ -93,6 +206,7 @@ pub enum Direction {
 struct PeerHandle {
     outgoing_tx: mpsc::UnboundedSender<OutgoingMessage>,
     device_id: Option<String>,
+    screen_size: Option<(f64, f64)>,
 }
 
 pub struct Coordinator {
@@ -103,15 +217,20 @@ pub struct Coordinator {
     next_conn_id: AtomicU64,
     events_tx: mpsc::UnboundedSender<CoordinatorEvent>,
     /// The peer currently receiving this device's input, if this
-    /// device is acting as controller. Real edge-detection is still
-    /// ⬜ (`ROADMAP.md`); today the only setter is the Devices page's
-    /// manual "Control this device" button. Cleared automatically on
-    /// that peer's disconnect, or when it sends us `releaseControl`.
+    /// device is acting as controller. Set either by the Devices page's
+    /// manual button or by the X11 edge watcher. Cleared automatically
+    /// when the sender-side virtual cursor returns through its remote
+    /// entry edge, on disconnect, or when the peer sends `releaseControl`.
     // Plain std Mutex, not tokio's — nothing here ever holds this
     // lock across an `.await`, so a sync lock lets GTK code (the
     // pointer-grab poll loop in `edge.rs`) read it directly without
     // needing an async round trip through the backend runtime.
     active_receiver: std::sync::Mutex<Option<ConnId>>,
+    /// Sender-side remote cursor used to detect the natural edge return
+    /// to this Linux desktop. Present only when control was activated by
+    /// an assigned screen edge; the manual Control button has no known
+    /// geometric entry edge and still relies on Emergency Stop.
+    remote_cursor: std::sync::Mutex<Option<RemoteCursorState>>,
     /// `Some` once `enable_receiver` has successfully opened
     /// `/dev/uinput` — every trusted peer's `InputEvent`s are then
     /// injected through it. `None` (the default) means this device
@@ -146,6 +265,8 @@ pub struct Coordinator {
     /// keyboard" (`ROADMAP.md`), not arbitrate multiple simultaneous
     /// controllers.
     being_controlled_by: Mutex<Option<ConnId>>,
+    preferred_controller: std::sync::Mutex<Option<String>>,
+    discovery_attempts: Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl Coordinator {
@@ -168,12 +289,15 @@ impl Coordinator {
             next_conn_id: AtomicU64::new(0),
             events_tx,
             active_receiver: std::sync::Mutex::new(None),
+            remote_cursor: std::sync::Mutex::new(None),
             injector: Mutex::new(None),
             receiver_enabled_flag: std::sync::atomic::AtomicBool::new(false),
             controller_enabled: std::sync::atomic::AtomicBool::new(false),
             controller_device_count: std::sync::atomic::AtomicUsize::new(0),
             emergency_stopped: std::sync::atomic::AtomicBool::new(false),
             being_controlled_by: Mutex::new(None),
+            preferred_controller: std::sync::Mutex::new(super::trust_store::preferred_controller()),
+            discovery_attempts: Mutex::new(std::collections::HashMap::new()),
         });
         (coordinator, events_rx)
     }
@@ -186,6 +310,7 @@ impl Coordinator {
     /// again replaces the previous virtual device.
     pub async fn enable_receiver(&self) -> Result<(), crate::input::inject::InjectionError> {
         let injector = InputInjectionService::open()?;
+        tracing::info!("receiver ready: virtual mouse and keyboard opened");
         *self.injector.lock().await = Some(injector);
         self.receiver_enabled_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -298,6 +423,7 @@ impl Coordinator {
     }
 
     async fn spawn_peer(self: Arc<Self>, socket: TcpStream, direction: Direction) {
+        tracing::info!(?direction, peer = ?socket.peer_addr().ok(), local = ?socket.local_addr().ok(), "peer transport connected");
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
         let (session_events_tx, mut session_events_rx) = mpsc::unbounded_channel();
@@ -307,11 +433,14 @@ impl Coordinator {
             PeerHandle {
                 outgoing_tx,
                 device_id: None,
+                screen_size: None,
             },
         );
         let _ = self
             .events_tx
-            .send(CoordinatorEvent::PeerConnected { conn_id, direction });
+            .send(CoordinatorEvent::PeerConnected {
+                conn_id, direction, local_addr: socket.local_addr().ok(), peer_addr: socket.peer_addr().ok(),
+            });
 
         let config = SessionConfig {
             local_device_id: self.local_device_id.clone(),
@@ -363,6 +492,7 @@ impl Coordinator {
                         let mut holder = this.being_controlled_by.lock().await;
                         let holds_control = match *holder {
                             None => {
+                                tracing::info!(conn_id, "trusted peer input received; receiver control started");
                                 *holder = Some(conn_id);
                                 true
                             }
@@ -371,6 +501,15 @@ impl Coordinator {
                         drop(holder);
 
                         if holds_control {
+                            if let Some(id) = this.peers.lock().await.get(&conn_id).and_then(|peer| peer.device_id.clone()) {
+                                let mut preferred = this.preferred_controller.lock().unwrap();
+                                if preferred.as_ref() != Some(&id) {
+                                    *preferred = Some(id.clone());
+                                    if let Err(error) = super::trust_store::save_preferred_controller(&id) {
+                                        tracing::warn!(%error, "could not remember preferred controller");
+                                    }
+                                }
+                            }
                             if let Some(injector) = this.injector.lock().await.as_mut() {
                                 if let Err(e) = injector.inject(input_event) {
                                     tracing::warn!(error = %e, conn_id, "input injection failed");
@@ -389,6 +528,19 @@ impl Coordinator {
                         handle.device_id = Some(device_id);
                     }
                 }
+                if let SessionEvent::PeerHello { ref hello, .. } = event {
+                    let negotiated_screen_size = peer_screen_size(hello);
+                    if let Some(handle) = this.peers.lock().await.get_mut(&conn_id) {
+                        handle.screen_size = negotiated_screen_size;
+                    }
+                    tracing::info!(
+                        conn_id,
+                        device_model = %hello.device_model,
+                        screen_width = negotiated_screen_size.map(|size| size.0),
+                        screen_height = negotiated_screen_size.map(|size| size.1),
+                        "peer pointer coordinate space selected"
+                    );
+                }
                 if matches!(event, SessionEvent::ReleaseControl { .. }) {
                     // PROTOCOL.md §5.6: the controller MUST immediately
                     // stop forwarding inputEvents on releaseControl.
@@ -398,6 +550,8 @@ impl Coordinator {
                     let mut active = this.active_receiver.lock().unwrap();
                     if *active == Some(conn_id) {
                         *active = None;
+                        drop(active);
+                        *this.remote_cursor.lock().unwrap() = None;
                     }
                 }
                 let _ = this.events_tx.send(translate(conn_id, event));
@@ -405,11 +559,21 @@ impl Coordinator {
                     break;
                 }
             }
+            tracing::info!(conn_id, reason = %disconnect_reason, "peer disconnected");
             this.peers.lock().await.remove(&conn_id);
             {
                 let mut active = this.active_receiver.lock().unwrap();
                 if *active == Some(conn_id) {
                     *active = None;
+                }
+            }
+            {
+                let mut cursor = this.remote_cursor.lock().unwrap();
+                if cursor
+                    .as_ref()
+                    .is_some_and(|state| state.conn_id == conn_id)
+                {
+                    *cursor = None;
                 }
             }
             let mut holder = this.being_controlled_by.lock().await;
@@ -444,6 +608,24 @@ impl Coordinator {
         }
     }
 
+    /// Broadcasts a local plain-text clipboard change to every live
+    /// session. Each session applies its own trust gate before putting
+    /// anything on the wire, so untrusted peers never receive it.
+    /// Sender-side UTF-8 truncation mirrors the Mac's 1 MiB cap.
+    pub async fn broadcast_clipboard(&self, text: &str) {
+        let mut service = ClipboardSyncService::new();
+        service.set_enabled(true);
+        let Some(payload) = service.build_payload(text) else {
+            return;
+        };
+        let peers = self.peers.lock().await;
+        for handle in peers.values() {
+            let _ = handle
+                .outgoing_tx
+                .send(OutgoingMessage::ClipboardText(payload.clone()));
+        }
+    }
+
     /// Manually trusts `conn_id` right now, without a `pairRequest`/
     /// `pairResponse` round trip — see `session::OutgoingMessage::
     /// TrustManually`'s doc comment for why this exists (the real Mac
@@ -463,6 +645,38 @@ impl Coordinator {
     /// page's manual "Control this device" button.
     pub async fn set_active_receiver(&self, conn_id: Option<ConnId>) {
         *self.active_receiver.lock().unwrap() = conn_id;
+        *self.remote_cursor.lock().unwrap() = None;
+    }
+
+    /// Activates a peer from a physical screen-edge crossing and seeds
+    /// the virtual cursor at the corresponding edge of the remote iMac.
+    /// This geometry is what lets raw evdev deltas detect a later return
+    /// through the same edge without cooperation from the receiver.
+    pub async fn set_active_receiver_from_edge(
+        &self,
+        conn_id: ConnId,
+        remote_entry_edge: RemoteEntryEdge,
+    ) {
+        let (screen_width, screen_height) = self
+            .peers
+            .lock()
+            .await
+            .get(&conn_id)
+            .and_then(|peer| peer.screen_size)
+            .unwrap_or((FALLBACK_REMOTE_SCREEN_WIDTH, FALLBACK_REMOTE_SCREEN_HEIGHT));
+        tracing::info!(
+            conn_id,
+            screen_width,
+            screen_height,
+            "remote pointer coordinate space activated"
+        );
+        *self.active_receiver.lock().unwrap() = Some(conn_id);
+        *self.remote_cursor.lock().unwrap() = Some(RemoteCursorState::new(
+            conn_id,
+            remote_entry_edge,
+            screen_width,
+            screen_height,
+        ));
     }
 
     pub async fn active_receiver(&self) -> Option<ConnId> {
@@ -472,6 +686,46 @@ impl Coordinator {
     /// Same as `active_receiver`, but synchronous — for GTK-thread
     /// polling (`edge.rs`'s pointer-grab loop) that can't await the
     /// backend runtime on every 50 ms tick without real overhead.
+    pub fn report_discovery(&self, event: super::discovery::DiscoveryEvent) {
+        let event = match event {
+            super::discovery::DiscoveryEvent::Resolved(peer) => CoordinatorEvent::PeerDiscovered(peer),
+            super::discovery::DiscoveryEvent::Removed(name) => CoordinatorEvent::PeerDiscoveryRemoved(name),
+        };
+        let _ = self.events_tx.send(event);
+    }
+
+    pub async fn connect_discovered(self: &Arc<Self>, peer: &super::discovery::DiscoveredPeer) -> std::io::Result<()> {
+        let Some(id) = peer.device_id.as_deref() else { return Ok(()); };
+        if !self.should_connect_discovered(id).await { return Ok(()); }
+        let Some(endpoint)=peer.endpoint() else {return Ok(());};
+        let key=format!("{id}@{endpoint}");
+        {
+            let mut attempts = self.discovery_attempts.lock().await;
+            if attempts.get(&key).is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(5)) { return Ok(()); }
+            attempts.insert(key, std::time::Instant::now());
+        }
+        self.dial(endpoint).await?;
+        Ok(())
+    }
+
+    pub async fn should_connect_discovered(&self, device_id: &str) -> bool {
+        if device_id == self.local_device_id { return false; }
+        if self.peers.lock().await.values().any(|peer|peer.device_id.as_deref()==Some(device_id)) { return false; }
+        self.trust_store.lock().await.is_trusted(device_id)
+    }
+
+    pub async fn needs_reconnect(&self) -> bool {
+        let connected: std::collections::HashSet<String> = self.peers.lock().await.values()
+            .filter_map(|peer| peer.device_id.clone()).collect();
+        let trusted: std::collections::HashSet<String> = self.trust_store.lock().await.trusted_devices()
+            .map(|peer|peer.device_id.clone()).collect();
+        reconnect_required(self.preferred_controller.lock().unwrap().as_deref(), &connected, &trusted)
+    }
+
+    pub fn receiving_controller_sync(&self) -> Option<ConnId> {
+        self.being_controlled_by.try_lock().ok().and_then(|holder| *holder)
+    }
+
     pub fn active_receiver_sync(&self) -> Option<ConnId> {
         *self.active_receiver.lock().unwrap()
     }
@@ -479,7 +733,7 @@ impl Coordinator {
     /// Forwards one input event to whichever peer `set_active_receiver`
     /// last selected, if any. No-op if nothing is currently targeted,
     /// or while `emergency_stop` is active.
-    pub async fn send_to_active_receiver(&self, event: InputEventMessage) {
+    pub async fn send_to_active_receiver(&self, mut event: InputEventMessage) {
         if self
             .emergency_stopped
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -493,6 +747,22 @@ impl Coordinator {
         // holding a `!Send` std MutexGuard across an await point.
         let target = *self.active_receiver.lock().unwrap();
         if let Some(conn_id) = target {
+            let returned_local = {
+                let mut cursor = self.remote_cursor.lock().unwrap();
+                cursor
+                    .as_mut()
+                    .filter(|state| state.conn_id == conn_id)
+                    .is_some_and(|state| state.observe(&mut event))
+            };
+            if returned_local {
+                *self.active_receiver.lock().unwrap() = None;
+                *self.remote_cursor.lock().unwrap() = None;
+                tracing::info!(
+                    conn_id,
+                    "remote cursor exited via entry edge; control returned locally"
+                );
+                return;
+            }
             self.send_input(conn_id, event).await;
         }
     }
@@ -564,11 +834,21 @@ fn translate(conn_id: ConnId, event: SessionEvent) -> CoordinatorEvent {
         SessionEvent::PairingRejected { .. } => CoordinatorEvent::PairingRejected { conn_id },
         SessionEvent::Heartbeat { rtt_ms } => CoordinatorEvent::Heartbeat { conn_id, rtt_ms },
         SessionEvent::InputEvent(event) => CoordinatorEvent::InputEvent { conn_id, event },
+        SessionEvent::ClipboardText { text } => CoordinatorEvent::ClipboardText { conn_id, text },
+        SessionEvent::FileTransfer(progress) => CoordinatorEvent::FileTransfer { conn_id, progress },
         SessionEvent::ReleaseControl { reason } => {
             CoordinatorEvent::ReleaseControl { conn_id, reason }
         }
         SessionEvent::Closed { reason } => CoordinatorEvent::PeerDisconnected { conn_id, reason },
     }
+}
+
+fn reconnect_required(preferred: Option<&str>, connected: &std::collections::HashSet<String>, trusted: &std::collections::HashSet<String>) -> bool {
+    if connected.is_empty() { return true; }
+    if let Some(preferred)=preferred.filter(|id|trusted.contains(*id)) {
+        return !connected.contains(preferred);
+    }
+    trusted.iter().any(|id|!connected.contains(id))
 }
 
 /// Ctrl+Shift+Escape — the global Emergency Stop toggle,
@@ -589,6 +869,23 @@ mod tests {
     use crate::protocol::payloads::input_event::InputEventKind;
     use std::time::Duration;
 
+    #[test]
+    fn a_connected_receiver_does_not_hide_a_missing_controller() {
+        let trusted=std::collections::HashSet::from(["controller".into(),"receiver".into()]);
+        let connected=std::collections::HashSet::from(["receiver".into()]);
+        assert!(reconnect_required(Some("controller"),&connected,&trusted));
+        assert!(reconnect_required(None,&connected,&trusted));
+    }
+    #[test]
+    fn an_offline_receiver_or_revoked_controller_does_not_flap_a_live_connection() {
+        let trusted=std::collections::HashSet::from(["controller".into(),"receiver".into()]);
+        let connected=std::collections::HashSet::from(["controller".into()]);
+        assert!(!reconnect_required(Some("controller"),&connected,&trusted));
+        let trusted=std::collections::HashSet::from(["receiver".into()]);
+        let connected=std::collections::HashSet::from(["receiver".into()]);
+        assert!(!reconnect_required(Some("revoked"),&connected,&trusted));
+    }
+
     fn hello(name: &str) -> HelloPayload {
         HelloPayload {
             device_name: name.to_string(),
@@ -596,6 +893,8 @@ mod tests {
             app_version: "0.1.0-test".to_string(),
             roles: vec!["controller".to_string(), "receiver".to_string()],
             platform: Some("Linux".to_string()),
+            screen_width: Some(1920),
+            screen_height: Some(1080),
         }
     }
 
@@ -656,6 +955,127 @@ mod tests {
             pressed: None,
             click_state: None,
         }
+    }
+
+    fn sample_delta_event(delta_x: f64, delta_y: f64) -> InputEventMessage {
+        InputEventMessage {
+            kind: InputEventKind::MouseMove,
+            x: None,
+            y: None,
+            delta_x: Some(delta_x),
+            delta_y: Some(delta_y),
+            button: None,
+            key_code: None,
+            media_key: None,
+            modifier_flags: 0,
+            pressed: None,
+            click_state: None,
+        }
+    }
+
+    #[test]
+    fn virtual_cursor_returns_only_through_its_entry_edge() {
+        let mut from_right = RemoteCursorState::new(7, RemoteEntryEdge::Right, 3840.0, 2160.0);
+        assert!(!from_right.observe(&mut sample_delta_event(-5000.0, 0.0)));
+        assert_eq!(from_right.x, 0.0, "opposite edge is a wall");
+        assert!(!from_right.observe(&mut sample_delta_event(3839.0, 0.0)));
+        assert!(from_right.observe(&mut sample_delta_event(1.0, 0.0)));
+
+        let mut from_left = RemoteCursorState::new(8, RemoteEntryEdge::Left, 3840.0, 2160.0);
+        assert!(!from_left.observe(&mut sample_delta_event(5000.0, 0.0)));
+        assert_eq!(from_left.x, 3839.0);
+        assert!(!from_left.observe(&mut sample_delta_event(-3839.0, 0.0)));
+        assert!(from_left.observe(&mut sample_delta_event(-1.0, 0.0)));
+    }
+
+    #[test]
+    fn virtual_cursor_does_not_return_mid_drag() {
+        let mut cursor = RemoteCursorState::new(7, RemoteEntryEdge::Right, 2560.0, 1440.0);
+        let mut button = sample_delta_event(0.0, 0.0);
+        button.kind = InputEventKind::MouseDown;
+        button.button = Some(0);
+        assert!(!cursor.observe(&mut button));
+        assert!(!cursor.observe(&mut sample_delta_event(10.0, 0.0)));
+
+        button.kind = InputEventKind::MouseUp;
+        assert!(!cursor.observe(&mut button));
+        assert!(cursor.observe(&mut sample_delta_event(1.0, 0.0)));
+    }
+
+    #[test]
+    fn edge_control_rewrites_relative_motion_to_remote_absolute_coordinates() {
+        let mut cursor = RemoteCursorState::new(7, RemoteEntryEdge::Right, 3840.0, 2160.0);
+        let mut event = sample_delta_event(-12.0, 5.0);
+
+        assert!(!cursor.observe(&mut event));
+        assert_eq!(event.x, Some(3827.0));
+        assert_eq!(event.y, Some(1085.0));
+        assert_eq!(event.delta_x, None);
+        assert_eq!(event.delta_y, None);
+    }
+
+    #[test]
+    fn legacy_imac_pro_hello_uses_the_logical_fallback() {
+        let mut legacy = hello("iMac Pro (2)");
+        legacy.platform = Some("macOS".into());
+        legacy.device_model = "iMacPro1,1".into();
+        legacy.app_version = "0.1.58".into();
+        legacy.screen_width = None;
+        legacy.screen_height = None;
+
+        assert_eq!(peer_screen_size(&legacy), None);
+    }
+
+    #[test]
+    fn advertised_size_is_used_for_a_current_peer() {
+        let mut current = hello("iMac Pro (2)");
+        current.platform = Some("macOS".into());
+        current.device_model = "iMacPro1,1".into();
+        current.screen_width = Some(3008);
+        current.screen_height = Some(1692);
+
+        assert_eq!(peer_screen_size(&current), Some((3008.0, 1692.0)));
+    }
+
+    #[tokio::test]
+    async fn edge_control_uses_the_peer_advertised_screen_size() {
+        let (coordinator, _events) =
+            Coordinator::new("local".into(), hello("Local"), empty_trust_store().await);
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded_channel();
+        coordinator.peers.lock().await.insert(
+            42,
+            PeerHandle {
+                outgoing_tx,
+                device_id: Some("wide-peer".into()),
+                screen_size: Some((5120.0, 2880.0)),
+            },
+        );
+
+        coordinator
+            .set_active_receiver_from_edge(42, RemoteEntryEdge::Right)
+            .await;
+
+        let cursor = coordinator.remote_cursor.lock().unwrap();
+        let cursor = cursor.as_ref().expect("remote cursor");
+        assert_eq!(cursor.x, 5119.0);
+        assert_eq!(cursor.y, 1440.0);
+        assert_eq!(cursor.screen_width, 5120.0);
+        assert_eq!(cursor.screen_height, 2880.0);
+    }
+
+    #[tokio::test]
+    async fn edge_exit_clears_the_active_receiver() {
+        let (coordinator, _events) =
+            Coordinator::new("local".into(), hello("Local"), empty_trust_store().await);
+        coordinator
+            .set_active_receiver_from_edge(42, RemoteEntryEdge::Right)
+            .await;
+        assert_eq!(coordinator.active_receiver().await, Some(42));
+
+        coordinator
+            .send_to_active_receiver(sample_delta_event(1.0, 0.0))
+            .await;
+        assert_eq!(coordinator.active_receiver().await, None);
     }
 
     /// Two full `Coordinator`s — one listening, one dialing — dialed,
@@ -726,6 +1146,28 @@ mod tests {
 
         assert_eq!(coordinator_a.known_device_ids().await, vec!["device-b"]);
         assert_eq!(coordinator_b.known_device_ids().await, vec!["device-a"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trusted_coordinators_exchange_clipboard_text() {
+        let (coordinator_a, _coordinator_b, _relay_a_rx, mut relay_b_rx) =
+            paired_coordinators().await;
+
+        coordinator_a.broadcast_clipboard("hello from Linux").await;
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), relay_b_rx.recv())
+                .await
+                .expect("timed out waiting for ClipboardText")
+                .expect("event stream closed")
+            {
+                CoordinatorEvent::ClipboardText { text, .. } => {
+                    assert_eq!(text, "hello from Linux");
+                    break;
+                }
+                _ => continue,
+            }
+        }
     }
 
     /// Emergency Stop (`ROADMAP.md` Phase 1, "matches the Mac's

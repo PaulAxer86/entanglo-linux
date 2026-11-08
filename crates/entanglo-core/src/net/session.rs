@@ -17,11 +17,12 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::features::file_transfer::{FileProgress, FileTransferService};
 use crate::protocol::envelope::unix_timestamp_now;
 use crate::protocol::message_type::MessageType;
 use crate::protocol::payloads::{
-    HeartbeatPayload, HelloPayload, InputEventMessage, PairRequestPayload, PairResponsePayload,
-    ReleaseControlPayload,
+    ClipboardTextPayload, HeartbeatPayload, HelloPayload, InputEventMessage, PairRequestPayload,
+    PairResponsePayload, ReleaseControlPayload, FileOfferPayload, FileChunkPayload, FileAckPayload,
 };
 use crate::protocol::EntangloMessage;
 
@@ -43,6 +44,7 @@ pub struct SessionConfig {
 pub enum OutgoingMessage {
     Input(InputEventMessage),
     ReleaseControl(ReleaseControlPayload),
+    ClipboardText(ClipboardTextPayload),
     /// Locally trust this peer right now, without waiting for a
     /// `pairRequest`/`pairResponse` round trip. Exists because the
     /// real `entanglo-macos` v0.1.58 turns out not to implement that
@@ -98,6 +100,12 @@ pub enum SessionEvent {
     /// Only ever emitted once `Trusted` has fired for this peer —
     /// see the `trusted` gate in the receive loop below.
     InputEvent(InputEventMessage),
+    /// Plain text received from a trusted peer. Platform code decides
+    /// whether clipboard sync is enabled before applying it locally.
+    ClipboardText {
+        text: String,
+    },
+    FileTransfer(FileProgress),
     ReleaseControl {
         reason: String,
     },
@@ -142,6 +150,10 @@ pub async fn run_session(
     let mut trusted = false;
     let mut heartbeat_seq: u64 = 0;
     let mut last_seen_peer_sent_at_ms: Option<f64> = None;
+    let mut files = FileTransferService::new();
+    let mut last_file_progress = Instant::now();
+    let mut logged_untrusted_input = false;
+    let mut logged_input_decode_error = false;
     let mut last_traffic = Instant::now();
     let mut heartbeat_timer = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat_timer.tick().await; // first tick fires immediately; skip it
@@ -202,6 +214,10 @@ pub async fn run_session(
                     }
                 }
                 let peer_id = peer_device_id.clone().expect("set immediately above");
+                // Mac and Linux may each dial, creating two sessions for one
+                // device. Trust granted on one session must apply to both.
+                refresh_trust(&peer_id, &trust_store, &mut trusted, &events_tx).await;
+
 
                 match msg.message_type {
                     MessageType::Hello => {
@@ -281,7 +297,7 @@ pub async fn run_session(
                     MessageType::Heartbeat => {
                         if let Ok(hb) = msg.decode_payload::<HeartbeatPayload>() {
                             last_seen_peer_sent_at_ms = hb.sent_at_ms;
-                            let rtt_ms = hb.echo_sent_at_ms.map(|echo| now_ms() - echo);
+                            let rtt_ms = transport.kernel_rtt_ms();
                             let _ = events_tx.send(SessionEvent::Heartbeat { rtt_ms });
                         }
                     }
@@ -290,8 +306,83 @@ pub async fn run_session(
                         // surfaced. Callers apply further gates (receiver
                         // role enabled, emergency stop) before injecting.
                         if trusted {
-                            if let Ok(event) = msg.decode_payload::<InputEventMessage>() {
-                                let _ = events_tx.send(SessionEvent::InputEvent(event));
+                            match msg.decode_payload::<InputEventMessage>() {
+                                Ok(event) => { let _ = events_tx.send(SessionEvent::InputEvent(event)); }
+                                Err(error) if !logged_input_decode_error => {
+                                    logged_input_decode_error = true;
+                                    tracing::warn!(%error, "input rejected: incompatible inputEvent payload (further decode errors suppressed)");
+                                }
+                                Err(_) => {}
+                            }
+                        } else if !logged_untrusted_input {
+                            logged_untrusted_input = true;
+                            tracing::warn!("input rejected: peer not trusted on Debian; authorize it in Devices with Trust");
+                        }
+                    }
+                    MessageType::ClipboardText => {
+                        // Clipboard data can contain sensitive user text,
+                        // so it has the same hard trust gate as input.
+                        if trusted {
+                            if let Ok(payload) = msg.decode_payload::<ClipboardTextPayload>() {
+                                let _ = events_tx.send(SessionEvent::ClipboardText {
+                                    text: payload.text,
+                                });
+                            }
+                        }
+                    }
+                    MessageType::FileOffer => {
+                        if let Ok(offer) = msg.decode_payload::<FileOfferPayload>() {
+                            let result = if trusted { files.begin_incoming(offer.clone()) }
+                                else { Err(anyhow::anyhow!("Device is not trusted")) };
+                            match result {
+                                Ok(progress) => {
+                                    tracing::info!(name = %progress.name, bytes = progress.total, "incoming file accepted");
+                                    let _ = events_tx.send(SessionEvent::FileTransfer(progress));
+                                }
+                                Err(error) => {
+                                    let reason = error.to_string();
+                                    if trusted {
+                                        let _ = events_tx.send(SessionEvent::FileTransfer(FileProgress {
+                                            transfer_id: offer.transfer_id.clone(), name: offer.name,
+                                            received: 0, total: offer.size_bytes, destination: None,
+                                            complete: false, error: Some(reason.clone()),
+                                        }));
+                                    }
+                                    let ack = FileAckPayload { transfer_id: offer.transfer_id, ok: false, failure_reason: Some(reason) };
+                                    send(&mut transport, &config, MessageType::FileAck, &ack).await?;
+                                }
+                            }
+                        }
+                    }
+                    MessageType::FileChunk => {
+                        if let Ok(chunk) = msg.decode_payload::<FileChunkPayload>() {
+                            let result = if trusted { files.apply_chunk(&chunk) }
+                                else { Err(anyhow::anyhow!("Device is not trusted")) };
+                            match result {
+                                Ok(progress) => {
+                                    if progress.complete {
+                                        tracing::info!(name = %progress.name, destination = ?progress.destination, "file received and saved");
+                                        let ack = FileAckPayload { transfer_id: chunk.transfer_id, ok: true, failure_reason: None };
+                                        send(&mut transport, &config, MessageType::FileAck, &ack).await?;
+                                    }
+                                    if progress.complete || last_file_progress.elapsed().as_millis() >= 100 {
+                                        last_file_progress = Instant::now();
+                                        let _ = events_tx.send(SessionEvent::FileTransfer(progress));
+                                    }
+                                }
+                                Err(error) => {
+                                    let reason = error.to_string();
+                                    tracing::warn!(%reason, "incoming file rejected");
+                                    if trusted {
+                                        let _ = events_tx.send(SessionEvent::FileTransfer(FileProgress {
+                                            transfer_id: chunk.transfer_id.clone(), name: String::new(),
+                                            received: 0, total: 0, destination: None,
+                                            complete: false, error: Some(reason.clone()),
+                                        }));
+                                    }
+                                    let ack = FileAckPayload { transfer_id: chunk.transfer_id, ok: false, failure_reason: Some(reason) };
+                                    send(&mut transport, &config, MessageType::FileAck, &ack).await?;
+                                }
                             }
                         }
                     }
@@ -301,7 +392,7 @@ pub async fn run_session(
                         }
                     }
                     other => {
-                        // Clipboard/file/URL/screenshot/error — Phase 2+,
+                        // File/URL/screenshot/error — Phase 2+,
                         // see ROADMAP.md. Ignored, not connection-ending,
                         // per the forward-compat rule in PROTOCOL.md §8.
                         tracing::debug!(?other, "message type deferred to a later phase");
@@ -368,7 +459,12 @@ pub async fn run_session(
                     OutgoingMessage::ReleaseControl(payload) if trusted => {
                         send(&mut transport, &config, MessageType::ReleaseControl, &payload).await?;
                     }
-                    OutgoingMessage::Input(_) | OutgoingMessage::ReleaseControl(_) => {
+                    OutgoingMessage::ClipboardText(payload) if trusted => {
+                        send(&mut transport, &config, MessageType::ClipboardText, &payload).await?;
+                    }
+                    OutgoingMessage::Input(_)
+                    | OutgoingMessage::ReleaseControl(_)
+                    | OutgoingMessage::ClipboardText(_) => {
                         // Not trusted yet — silently dropped, matching
                         // the previous `if trusted` guard's behavior.
                     }
@@ -394,11 +490,98 @@ async fn send<T: serde::Serialize>(
     Ok(())
 }
 
+// Refresh from the shared store instead of retaining a per-socket snapshot.
+async fn refresh_trust(
+    device_id: &str,
+    store: &Arc<Mutex<TrustStore>>,
+    trusted: &mut bool,
+    events: &mpsc::UnboundedSender<SessionEvent>,
+) {
+    let current = store.lock().await.is_trusted(device_id);
+    if current && !*trusted {
+        tracing::info!("shared device trust applied to connection");
+        let _ = events.send(SessionEvent::Trusted { device_id: device_id.to_owned() });
+    }
+    *trusted = current;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn trust_granted_on_another_connection_is_applied_and_revocation_is_respected() {
+        let store = Arc::new(Mutex::new(TrustStore::empty_for_test()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut trusted = false;
+        refresh_trust("mac", &store, &mut trusted, &tx).await;
+        assert!(!trusted);
+        assert!(rx.try_recv().is_err());
+        store.lock().await.trust(TrustedDevice {
+            device_id: "mac".into(), friendly_name: "Mac".into(), trusted_since_unix: 0.0,
+        });
+        refresh_trust("mac", &store, &mut trusted, &tx).await;
+        assert!(trusted);
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Trusted { device_id }) if device_id == "mac"));
+        refresh_trust("mac", &store, &mut trusted, &tx).await;
+        assert!(rx.try_recv().is_err());
+        store.lock().await.revoke("mac");
+        refresh_trust("mac", &store, &mut trusted, &tx).await;
+        assert!(!trusted);
+    }
+
+    async fn receive_file_over_wire(trust_peer: bool) {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = std::env::temp_dir().join(format!("entanglo-wire-file-{}", uuid::Uuid::new_v4()));
+        let old_download = std::env::var_os("XDG_DOWNLOAD_DIR");
+        std::env::set_var("XDG_DOWNLOAD_DIR", &dir);
+        let (raw_socket, session_socket) = loopback_pair().await;
+        let store = Arc::new(Mutex::new(TrustStore::empty_for_test()));
+        if trust_peer {
+            store.lock().await.trust(TrustedDevice { device_id: "mac-peer".into(), friendly_name: "Mac".into(), trusted_since_unix: 0.0 });
+        }
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (_outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_session(NetworkTransport::new(session_socket), SessionConfig {
+            local_device_id: "linux".into(), local_session_id: "linux-session".into(), local_hello: hello("Linux"),
+        }, store, events_tx, outgoing_rx));
+        let mut raw = NetworkTransport::new(raw_socket);
+        raw.send(&EntangloMessage::encode_payload(MessageType::Hello, "mac-peer", "mac-session", &hello("Mac")).unwrap()).await.unwrap();
+        let bytes: Vec<u8> = (0..65553).map(|i| (i % 251) as u8).collect();
+        let offer = FileOfferPayload { transfer_id: "wire-file".into(), name: "binary.dat".into(),
+            size_bytes: bytes.len() as u64, total_chunks: 2, chunk_size: 65536, kind: None };
+        raw.send(&EntangloMessage::encode_payload(MessageType::FileOffer, "mac-peer", "mac-session", &offer).unwrap()).await.unwrap();
+        if trust_peer {
+            for (sequence, data) in bytes.chunks(65536).enumerate() {
+                let chunk = FileChunkPayload { transfer_id: "wire-file".into(), sequence: sequence as u32, data: STANDARD.encode(data) };
+                raw.send(&EntangloMessage::encode_payload(MessageType::FileChunk, "mac-peer", "mac-session", &chunk).unwrap()).await.unwrap();
+            }
+        }
+        let ack = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = raw.recv().await.unwrap();
+                if message.message_type == MessageType::FileAck { break message.decode_payload::<FileAckPayload>().unwrap(); }
+            }
+        }).await.unwrap();
+        assert_eq!(ack.ok, trust_peer);
+        if trust_peer {
+            assert_eq!(std::fs::read(dir.join("Entanglo/binary.dat")).unwrap(), bytes);
+        } else {
+            assert!(!dir.join("Entanglo").exists());
+            while let Ok(event) = events_rx.try_recv() { assert!(!matches!(event, SessionEvent::FileTransfer(_))); }
+        }
+        drop(raw); task.abort(); let _ = task.await;
+        if let Some(old) = old_download { std::env::set_var("XDG_DOWNLOAD_DIR", old); } else { std::env::remove_var("XDG_DOWNLOAD_DIR"); }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn trusted_mac_wire_file_is_saved_and_acknowledged() { receive_file_over_wire(true).await; }
+
+    #[tokio::test]
+    async fn untrusted_file_offer_is_rejected_without_writing() { receive_file_over_wire(false).await; }
 
     fn hello(name: &str) -> HelloPayload {
         HelloPayload {
@@ -407,6 +590,8 @@ mod tests {
             app_version: "0.1.0-test".to_string(),
             roles: vec!["controller".to_string(), "receiver".to_string()],
             platform: Some("Linux".to_string()),
+            screen_width: Some(1920),
+            screen_height: Some(1080),
         }
     }
 
@@ -545,6 +730,56 @@ mod tests {
                     break;
                 }
                 _ => continue,
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn untrusted_peer_clipboard_is_not_exposed() {
+        let (raw_peer_socket, session_socket) = loopback_pair().await;
+        let store = empty_trust_store().await;
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (_outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let config = SessionConfig {
+            local_device_id: "local-device".to_string(),
+            local_session_id: uuid::Uuid::new_v4().to_string(),
+            local_hello: hello("Local"),
+        };
+        tokio::spawn(run_session(
+            NetworkTransport::new(session_socket),
+            config,
+            store,
+            events_tx,
+            outgoing_rx,
+        ));
+
+        let mut raw_peer = NetworkTransport::new(raw_peer_socket);
+        let raw_hello = EntangloMessage::encode_payload(
+            MessageType::Hello,
+            "untrusted-peer",
+            "raw-session",
+            &hello("Untrusted"),
+        )
+        .unwrap();
+        raw_peer.send(&raw_hello).await.unwrap();
+        let clipboard = EntangloMessage::encode_payload(
+            MessageType::ClipboardText,
+            "untrusted-peer",
+            "raw-session",
+            &ClipboardTextPayload {
+                text: "must stay hidden".to_string(),
+            },
+        )
+        .unwrap();
+        raw_peer.send(&clipboard).await.unwrap();
+
+        loop {
+            match tokio::time::timeout(Duration::from_millis(300), events_rx.recv()).await {
+                Ok(Some(SessionEvent::ClipboardText { .. })) => {
+                    panic!("clipboard text from an untrusted peer reached the caller")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
             }
         }
     }

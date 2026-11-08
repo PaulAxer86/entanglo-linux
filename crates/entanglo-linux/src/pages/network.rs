@@ -10,10 +10,13 @@ use entanglo_core::features::network_quality::SuggestedMode;
 use gtk::prelude::*;
 use gtk::{ListBox, ScrolledWindow, Widget};
 
+use super::layout;
 use crate::state::AppShared;
 
 pub fn build(shared: &Rc<AppShared>) -> Widget {
     let list = ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
     refresh(shared, &list);
 
     let shared_poll = Rc::clone(shared);
@@ -23,11 +26,16 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
         glib::ControlFlow::Continue
     });
 
-    ScrolledWindow::builder()
+    let scrolled = ScrolledWindow::builder()
         .child(&list)
         .vexpand(true)
-        .build()
-        .into()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    layout::page(
+        "Network",
+        "Connected device latency and recommended network mode.",
+        &scrolled,
+    )
 }
 
 fn refresh(shared: &Rc<AppShared>, list: &ListBox) {
@@ -37,9 +45,13 @@ fn refresh(shared: &Rc<AppShared>, list: &ListBox) {
 
     let stats = shared.network_stats_snapshot();
     if stats.is_empty() {
-        list.append(&gtk::Label::new(Some(
-            "No heartbeats yet — connect to a peer first.",
-        )));
+        let empty = gtk::Label::new(Some("No heartbeats yet — connect to a peer first."));
+        empty.set_halign(gtk::Align::Start);
+        empty.set_margin_top(14);
+        empty.set_margin_bottom(14);
+        empty.set_margin_start(16);
+        empty.set_margin_end(16);
+        list.append(&empty);
         return;
     }
 
@@ -54,9 +66,17 @@ fn refresh(shared: &Rc<AppShared>, list: &ListBox) {
             SuggestedMode::Unstable => "Unstable",
             SuggestedMode::Offline => "Offline",
         };
-        list.append(&gtk::Label::new(Some(&format!(
+        let row = gtk::Label::new(Some(&format!(
             "{}  ·  {rtt_text}  ·  {mode_text}",
             stat.device_name
-        ))));
+        )));
+        row.set_halign(gtk::Align::Start);
+        row.set_xalign(0.0);
+        row.set_wrap(true);
+        row.set_margin_top(14);
+        row.set_margin_bottom(14);
+        row.set_margin_start(16);
+        row.set_margin_end(16);
+        list.append(&row);
     }
 }

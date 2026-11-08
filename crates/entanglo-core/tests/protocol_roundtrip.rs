@@ -10,6 +10,8 @@ fn hello_roundtrips() {
         app_version: "0.1.0".into(),
         roles: vec!["controller".into(), "receiver".into()],
         platform: Some("Linux".into()),
+        screen_width: Some(1920),
+        screen_height: Some(1080),
     };
     let msg = EntangloMessage::encode_payload(MessageType::Hello, "dev-id", "sess-id", &payload)
         .expect("encode");
@@ -17,6 +19,20 @@ fn hello_roundtrips() {
     let back = EntangloMessage::decode(&bytes).expect("decode envelope");
     let decoded: HelloPayload = back.decode_payload().expect("decode payload");
     assert_eq!(payload, decoded);
+    assert_eq!(decoded.screen_size(), Some((1920.0, 1080.0)));
+}
+
+#[test]
+fn hello_without_screen_size_remains_backward_compatible() {
+    let json = br#"{
+        "deviceName":"OldPeer",
+        "deviceModel":"Mac",
+        "appVersion":"0.1.58",
+        "roles":["receiver"],
+        "platform":"macOS"
+    }"#;
+    let decoded: HelloPayload = serde_json::from_slice(json).expect("legacy hello");
+    assert_eq!(decoded.screen_size(), None);
 }
 
 #[test]

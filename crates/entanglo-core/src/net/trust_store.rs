@@ -63,10 +63,21 @@ pub enum TrustStoreError {
 }
 
 impl TrustStore {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self { devices: HashMap::new(), backend: Backend::File }
+    }
+
     /// Try Secret Service first (bounded by `SECRET_SERVICE_TIMEOUT`
     /// so a broken/absent D-Bus session can't hang startup); fall
     /// back to the encrypted file on any error.
     pub async fn load() -> Result<Self, TrustStoreError> {
+        // Once Secret Service has failed a save, the encrypted fallback
+        // contains the newest trust decisions. Do not discard it merely
+        // because Secret Service can read an older (or empty) item again.
+        if let Some(store) = Self::load_saved_fallback(&data_dir())? {
+            return Ok(store);
+        }
         match tokio::time::timeout(SECRET_SERVICE_TIMEOUT, secret_service_backend::load()).await {
             Ok(Ok(devices)) => {
                 return Ok(Self {
@@ -85,6 +96,13 @@ impl TrustStore {
             devices,
             backend: Backend::File,
         })
+    }
+
+    fn load_saved_fallback(dir: &std::path::Path) -> Result<Option<Self>, TrustStoreError> {
+        if !dir.join("trust.json.enc").try_exists()? {
+            return Ok(None);
+        }
+        Ok(Some(Self { devices: file_backend::load(dir)?, backend: Backend::File }))
     }
 
     pub fn is_trusted(&self, device_id: &str) -> bool {
@@ -307,4 +325,39 @@ mod file_backend {
             std::fs::remove_dir_all(&dir).unwrap();
         }
     }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_trust_and_revocation_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("entanglo-fallback-{}", uuid::Uuid::new_v4()));
+        assert!(TrustStore::load_saved_fallback(&dir).unwrap().is_none());
+        let mut devices = HashMap::new();
+        devices.insert("mac".into(), TrustedDevice {
+            device_id: "mac".into(), friendly_name: "Mac".into(), trusted_since_unix: 0.0,
+        });
+        file_backend::save(&dir, &devices).unwrap();
+        let loaded = TrustStore::load_saved_fallback(&dir).unwrap().unwrap();
+        assert!(loaded.is_trusted("mac"));
+        assert_eq!(loaded.backend, Backend::File);
+        file_backend::save(&dir, &HashMap::new()).unwrap();
+        let loaded = TrustStore::load_saved_fallback(&dir).unwrap().unwrap();
+        assert!(!loaded.is_trusted("mac"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Remember which trusted controller actually supplied input, independently of
+/// service names and TCP connections. This is a preference, never a trust grant.
+pub fn preferred_controller() -> Option<String> {
+    std::fs::read_to_string(data_dir().join("preferred_controller")).ok()
+        .map(|id| id.trim().to_owned()).filter(|id| !id.is_empty())
+}
+
+pub fn save_preferred_controller(device_id: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir())?;
+    std::fs::write(data_dir().join("preferred_controller"), device_id)
 }

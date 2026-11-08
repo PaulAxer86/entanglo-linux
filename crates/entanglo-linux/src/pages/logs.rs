@@ -12,6 +12,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{ScrolledWindow, TextView, Widget};
 
+use super::layout;
 use crate::state::AppShared;
 
 pub fn build(shared: &Rc<AppShared>) -> Widget {
@@ -19,13 +20,17 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
         .editable(false)
         .cursor_visible(false)
         .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
         .build();
-    text_view.set_left_margin(8);
-    text_view.set_top_margin(8);
+    text_view.set_left_margin(14);
+    text_view.set_right_margin(14);
+    text_view.set_top_margin(14);
+    text_view.set_bottom_margin(14);
 
     let scrolled = ScrolledWindow::builder()
         .child(&text_view)
         .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
     refresh(shared, &text_view, &scrolled);
@@ -38,7 +43,12 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
         glib::ControlFlow::Continue
     });
 
-    scrolled.into()
+    scrolled.add_css_class("card");
+    layout::page(
+        "Logs",
+        "Recent application events. Keystroke content is never recorded.",
+        &scrolled,
+    )
 }
 
 fn refresh(shared: &Rc<AppShared>, text_view: &TextView, scrolled: &ScrolledWindow) {

@@ -29,7 +29,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode};
 use x11rb::rust_connection::RustConnection;
 
-use entanglo_core::net::ConnId;
+use entanglo_core::net::{ConnId, RemoteEntryEdge};
 
 use crate::state::AppShared;
 
@@ -210,14 +210,25 @@ fn edge_for_x(x: i16, screen_width: i16) -> Option<ScreenEdge> {
 /// missing X11 connection (`EdgeWatcher::connect` returning `None`)
 /// just skips starting the loop — logged once, not a hard error.
 pub fn start(shared: &Rc<AppShared>) {
+    if std::env::var_os("ENTANGLO_RECEIVER_ONLY").is_some() {
+        tracing::info!("receiver-only mode: local pointer capture disabled");
+        return;
+    }
     let Some(mut watcher) = EdgeWatcher::connect() else {
         return;
     };
     let shared = Rc::clone(shared);
     glib::source::timeout_add_local(std::time::Duration::from_millis(50), move || {
         if let Some(edge) = watcher.poll() {
-            if let Some(conn_id) = shared.conn_id_for_edge(edge) {
-                activate(&shared, conn_id);
+            // The hidden X11 cursor is still free to move while raw
+            // evdev events control the peer. It can therefore leave and
+            // re-enter the local edge during one remote-control session.
+            // Re-activating here would reseed the virtual remote cursor
+            // on every such crossing, visibly pinning it to that edge.
+            if should_activate_edge(shared.backend.coordinator.active_receiver_sync()) {
+                if let Some(conn_id) = shared.conn_id_for_edge(edge) {
+                    activate(&shared, conn_id, edge);
+                }
             }
         }
         // Grab/ungrab tracks `active_receiver` directly rather than
@@ -255,10 +266,23 @@ fn should_grab_pointer(emergency_stopped: bool, active_receiver: Option<ConnId>)
     !emergency_stopped && active_receiver.is_some()
 }
 
-fn activate(shared: &Rc<AppShared>, conn_id: ConnId) {
+/// An edge crossing starts a session only while control is local. The
+/// X11 pointer keeps moving invisibly during remote control, so its later
+/// crossings must not reset the already-active remote virtual cursor.
+fn should_activate_edge(active_receiver: Option<ConnId>) -> bool {
+    active_receiver.is_none()
+}
+
+fn activate(shared: &Rc<AppShared>, conn_id: ConnId, local_edge: ScreenEdge) {
     let coordinator = Arc::clone(&shared.backend.coordinator);
+    let remote_entry_edge = match local_edge {
+        ScreenEdge::Left => RemoteEntryEdge::Right,
+        ScreenEdge::Right => RemoteEntryEdge::Left,
+    };
     shared.backend.handle.spawn(async move {
-        coordinator.set_active_receiver(Some(conn_id)).await;
+        coordinator
+            .set_active_receiver_from_edge(conn_id, remote_entry_edge)
+            .await;
     });
 }
 
@@ -313,5 +337,11 @@ mod tests {
     #[test]
     fn does_not_grab_when_stopped_with_no_target_either() {
         assert!(!should_grab_pointer(true, None));
+    }
+
+    #[test]
+    fn edge_crossing_activates_only_while_control_is_local() {
+        assert!(should_activate_edge(None));
+        assert!(!should_activate_edge(Some(42)));
     }
 }

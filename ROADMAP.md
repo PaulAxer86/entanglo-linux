@@ -190,6 +190,27 @@ live reference implementations, not just loopback-TCP unit tests.
   unit tests as proof by themselves given how this bug slipped through
   the first time (it was a real X11 grab, not something a loopback
   test would ever have caught).
+  **Return-from-peer fix, verified live 2026-09-16:** Linux originally
+  had no equivalent of the Mac's sender-side virtual cursor, so entering
+  iMac 2 worked but pushing back through the adjacent remote edge could
+  never clear `active_receiver`; the X11 grab therefore remained active.
+  `Coordinator` now remembers the remote entry edge, seeds a virtual
+  2560×1440 cursor exactly like the Swift reference, accumulates raw evdev
+  deltas, treats the opposite edge as a wall, and returns locally only
+  through the entry edge (never mid-drag). Three consecutive real
+  Linux→iMac 2→Linux round trips produced grab → `control returned
+  locally` → ungrab. Three new tests cover both directions, anti-loop,
+  drag safety, and clearing the active receiver.
+  **Coordinate negotiation and edge-reset follow-up, 2026-09-17:**
+  `HelloPayload` now optionally advertises `screenWidth` and
+  `screenHeight`; the virtual cursor uses the peer's advertised coordinate
+  space and retains 2560×1440 only as the fallback for older clients. The
+  deployed iMac 2 app is still 0.1.58 and omits the fields. Live diagnostics
+  also showed the X11 edge poller reactivating an already-active session and
+  reseeding the remote cursor on its entry edge. Edge activation is now
+  gated on `active_receiver == None`, with a regression test. Full workspace
+  suite: 58/58. The corrected app has been relaunched; final physical
+  confirmation of free movement across iMac 2 remains pending.
 - ✅ `releaseControl` on the receiver when local input is touched —
   both sides now wired: `Coordinator::enable_controller`'s per-device
   evdev loop sends it the instant *any* real local hardware input
@@ -224,10 +245,22 @@ clicks were silently dropped by capture — `translate` was looking
 doesn't contain them, so cursor movement would have worked but clicks
 never would have. Both covered by new unit tests.
 
-### Two Phase 2 pages pulled forward: Network + Logs
+### Phase 2 work pulled forward: Clipboard, Network + Logs
 
 Not part of the original Phase 1 checklist, but low-effort and
 genuinely useful given data that was already flowing:
+
+- ✅ **Plain-text clipboard sync** — ported from the Swift
+  `ClipboardSyncService`: opt-in and off by default, polls the GTK/GDK
+  clipboard every 500 ms, broadcasts only to trusted sessions, applies
+  only trusted inbound frames, caps outgoing UTF-8 at 1 MiB, and marks
+  remote writes as already seen so they cannot echo between peers.
+  The Settings page has the enable toggle. Unit/integration coverage
+  includes default-off behavior, UTF-8 truncation, local deduplication,
+  trusted coordinator-to-coordinator transfer, and rejection of an
+  untrusted peer's clipboard frame. The GTK app and real trusted Mac
+  connection were verified live on 2026-09-16; a manual copy/paste in
+  both directions with the Mac toggle enabled remains to be exercised.
 
 - ✅ **Logs page** — `entanglo_core::logging::LogBuffer`, a real
   in-memory ring buffer (500 lines) fed by a second
@@ -281,7 +314,7 @@ evdev/uinput path really is display-server-agnostic as designed.
 
 ### Things deliberately deferred from phase 1
 
-- Clipboard sync
+- Clipboard sync (completed early on 2026-09-16; see above)
 - File transfer
 - Screenshot peer
 - URL push
@@ -299,7 +332,8 @@ evdev/uinput path really is display-server-agnostic as designed.
 
 ### Deliverables
 
-- **Clipboard sync** (`arboard` crate, text first, image after).
+- ✅ **Clipboard sync** (plain text via GTK/GDK, no extra `arboard`
+  dependency; opt-in, trust-gated, echo-suppressed, 1 MiB UTF-8 cap).
 - **File drop** (offer/chunk/ack). Files land in `$XDG_DOWNLOAD_DIR`
   (fallback `~/Downloads`).
 - **URL push** (`xdg-open` with a scheme allow-list, spawned via

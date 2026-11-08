@@ -1,80 +1,66 @@
-# Entanglo for Linux (Debian) — handoff package
+# Entanglo for Linux
 
-This folder is the **entry point** for porting Entanglo (a native
-macOS app for sharing input / clipboard / files / printer across
-machines on the same Wi-Fi) to Linux, with **Debian** as the primary
-target distro.
+Native GTK4/libadwaita receiver for Entanglo peers on the same LAN.
+Tested on Debian 13 amd64 with X11 and macOS Entanglo 0.1.58/0.1.59.
 
-Everything you need to start is here:
+## Download and install
 
-- [`PROTOCOL.md`](PROTOCOL.md) — the wire protocol spec. Authoritative.
-  Build the Linux client to match this and it will pair with the Mac,
-  Windows, and Android peers out of the box.
-- [`STACK.md`](STACK.md) — recommended Linux stack, with rationale for
-  each choice.
-- [`ROADMAP.md`](ROADMAP.md) — phased plan, from MVP to feature parity.
-- [`SKELETON.md`](SKELETON.md) — concrete Cargo workspace layout +
-  file-by-file starter to scaffold a new `entanglo-linux` project.
+Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
-**Picking this up mid-development?** Start with the "Handover status"
-section at the top of [`docs/DEV.md`](docs/DEV.md) instead of this
-file — it says exactly what's done, what's just been fixed but not
-yet re-verified live, and what to check first.
+```sh
+sudo apt install ./entanglo-linux_0.1.1_amd64.deb
+sudo usermod -aG input "$USER"
+```
 
----
+Open **Entanglo** from the application menu. Existing group membership is
+activated for the app without requiring a desktop logout. In **Devices**,
+trust the controller. On macOS enable sharing and the Controller role, then
+select this Linux device. Use an X11 desktop for Mac absolute pointer input.
 
-## TL;DR if you have 60 seconds
+## Included
 
-Goal: a Debian machine that **talks the same wire protocol** as the
-Mac, Windows and Android peers, so any of them can share a single
-mouse + keyboard + clipboard with it on the same LAN.
+- Mouse, keyboard and plain-text clipboard reception from trusted peers.
+- Streaming file reception into `Downloads/Entanglo`, with progress, collision
+  handling, partial-file cleanup and completion acknowledgements.
+- One row per device, with capability icons and clear authorization state.
+- A live Dashboard with actual TCP RTT, interface, heartbeat and recent files.
+- Stable device identity, persisted trust, port 55555 and Bonjour reconnect
+  announcements when a controller has not returned after an update.
+- Standard minimize/maximize/close controls, Ctrl+Q and the original rabbit icon.
+- Automatic hourly update checks. **News & Updates** downloads and verifies
+  releases before installing. Personal installs update in the user account;
+  system installs use the standard administrator authentication dialog.
 
-Stack chosen: **Rust** for everything (core + UI), **GTK4 +
-libadwaita** for the app shell, **raw `/dev/input` (evdev) capture +
-`/dev/uinput` injection** for input — bypassing X11/Wayland entirely
-so the same binary works unmodified on both display servers.
+Receiving is the default. Local input capture is opt-in via
+`ENTANGLO_ENABLE_CONTROLLER=1`; Linux-to-Linux control needs separate testing.
+File sending, printing and Wayland input reception are not yet implemented.
 
-Why: this repo is the first target to actually build the Rust
-`entanglo-core` crate the macOS roadmap has been pointing at since
-0.1 ("0.3 — extract Protocol/ into a Rust crate; Linux receiver").
-Kernel-level evdev/uinput is also exactly the technique
-`entanglo-android`'s `cpp/uinput.c` already proved works end-to-end
-against a live Mac controller — Linux desktop just gets it without
-needing root, via the `input` group.
+## Build and test
 
-First milestone (3–4 weeks solo): MVP that pairs with a Mac (or
-Windows/Android) peer and forwards mouse + keyboard, running on
-stock Debian 12/13 with GNOME (Wayland) as the reference desktop.
-Everything else layers on top.
+```sh
+sudo apt install cargo rustc build-essential pkg-config libgtk-4-dev libadwaita-1-dev libudev-dev
+cargo test --locked --workspace -- --test-threads=1
+cargo build --locked -p entanglo-linux
+python3 scripts/package-debian.py
+```
 
----
+The project targets Debian 13's Rust 1.85 and GTK 4.18. Packages are built on
+Debian 13 to avoid introducing a newer glibc requirement. Run
+`scripts/setup-debian.sh` for a development install.
 
-## Reference implementations
+## Releases and automatic publishing
 
-| Repo | Platform | Role |
-|---|---|---|
-| [`PaulAxer86/entanglo-macos`](https://github.com/PaulAxer86/entanglo-macos) | macOS, Swift/SwiftUI | Reference implementation, protocol source of truth |
-| [`PaulAxer86/entanglo-windows`](https://github.com/PaulAxer86/entanglo-windows) | Windows, C#/WinUI 3 | Handoff package (this repo's sibling / template) |
-| [`PaulAxer86/entanglo-android`](https://github.com/PaulAxer86/entanglo-android) | Android TV (DQ08 box), Kotlin | Receiver-only; proves evdev/uinput injection against a real Mac controller |
-| `entanglo-linux` (this repo) | Debian, Rust + GTK4 | New target |
+The Linux repository is <https://github.com/PaulAxer86/entanglo-linux>.
+The website repository publishes the Linux build after a new version is
+pushed to the Linux repository: tests, build, `.deb`, checksum manifest,
+website commit and deployment. See [docs/RELEASING.md](docs/RELEASING.md).
 
-They only share the protocol, not the code — each platform repo is
-independent.
+Logs are saved for both desktop and terminal launches in
+`~/.local/state/entanglo/last.log`. The **Reconnect** Dashboard action refreshes
+Bonjour without changing device identity. Closing the window stops input,
+withdraws the network advertisement and quits.
 
-Current versions at time of writing: Mac **0.1.58** (2026-08-08),
-Windows **0.1.55**, Android **v0.1** (2026-08-21, end-to-end working).
+Protocol details: [PROTOCOL.md](PROTOCOL.md). Development history:
+[docs/DEV.md](docs/DEV.md). No keystroke content is logged.
 
-Website + downloads: <https://entanglo.pages.dev>.
-Update manifests: `/updates/latest.json` (Mac), `/updates/latest-win.json`
-(Win) — this repo should add `/updates/latest-linux.json` when it ships
-auto-update (Phase 2).
-
-If the Mac protocol bumps, `PROTOCOL.md` here gets updated. Watch its
-first line for the document date.
-
----
-
-## License & ownership
-
-All Entanglo apps are by Paolo Asara. Copy this folder freely to any
-machine you'll develop on.
+Copyright Paolo Asara. See Cargo workspace metadata for licensing.

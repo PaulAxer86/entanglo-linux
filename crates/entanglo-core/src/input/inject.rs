@@ -17,6 +17,27 @@ use crate::protocol::keymap;
 use crate::protocol::payloads::input_event::{InputEventKind, InputEventMessage};
 
 use super::modifiers::ModifierState;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::ConnectionExt;
+use x11rb::rust_connection::RustConnection;
+
+struct AbsolutePointer {
+    connection: RustConnection,
+    root: u32,
+    width: u16,
+    height: u16,
+}
+
+fn map_absolute(x: f64, y: f64, width: u16, height: u16) -> Option<(i16, i16)> {
+    if !x.is_finite() || !y.is_finite() || width == 0 || height == 0 {
+        return None;
+    }
+    // macOS 0.1.58 uses a fixed logical remote canvas of 2560 x 1440.
+    let x = (x.clamp(0.0, 2559.0) / 2559.0 * f64::from(width - 1)).round();
+    let y = (y.clamp(0.0, 1439.0) / 1439.0 * f64::from(height - 1)).round();
+    Some((x.min(i16::MAX as f64) as i16, y.min(i16::MAX as f64) as i16))
+}
+
 
 /// Also the filter `input::capture::InputCaptureService::enumerate_devices`
 /// uses to make sure our own virtual device never gets captured back
@@ -26,6 +47,7 @@ pub const VIRTUAL_DEVICE_NAME: &str = "Entanglo Virtual Input";
 pub struct InputInjectionService {
     device: VirtualDevice,
     modifiers: ModifierState,
+    absolute_pointer: Option<AbsolutePointer>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +56,8 @@ pub enum InjectionError {
     Io(#[from] std::io::Error),
     #[error("unmapped mac key code {0}")]
     UnmappedKeyCode(u16),
+    #[error("absolute pointer injection unavailable: {0}")]
+    AbsolutePointer(String),
 }
 
 impl InputInjectionService {
@@ -63,9 +87,19 @@ impl InputInjectionService {
             .with_relative_axes(&axes)?
             .build()?;
 
+        let absolute_pointer = if std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland") {
+            None
+        } else {
+            RustConnection::connect(None).ok().map(|(connection, screen)| {
+                let root = &connection.setup().roots[screen];
+                let (root, width, height) = (root.root, root.width_in_pixels, root.height_in_pixels);
+                AbsolutePointer { connection, root, width, height }
+            })
+        };
         Ok(Self {
             device,
             modifiers: ModifierState::default(),
+            absolute_pointer,
         })
     }
 
@@ -90,10 +124,16 @@ impl InputInjectionService {
                         InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, dy as i32),
                     ])?;
                 }
-                // Absolute x/y (screen points) requires an EV_ABS
-                // device instead of EV_REL — deferred; Phase 1 ships
-                // relative-delta forwarding only, matching how the
-                // Mac controller already emits deltas for edge-drag.
+                else if let (Some(x), Some(y)) = (event.x, event.y) {
+                    let pointer = self.absolute_pointer.as_ref().ok_or_else(||
+                        InjectionError::AbsolutePointer("requires an X11 desktop".into()))?;
+                    if let Some((x, y)) = map_absolute(x, y, pointer.width, pointer.height) {
+                        pointer.connection.warp_pointer(
+                            x11rb::NONE, pointer.root, 0, 0, 0, 0, x, y,
+                        ).map_err(|e| InjectionError::AbsolutePointer(e.to_string()))?
+                         .check().map_err(|e| InjectionError::AbsolutePointer(e.to_string()))?;
+                    }
+                }
             }
             InputEventKind::MouseDown | InputEventKind::MouseUp => {
                 let pressed = event.kind == InputEventKind::MouseDown;
@@ -136,5 +176,25 @@ impl InputInjectionService {
         self.device
             .emit(&[InputEvent::new(EventType::KEY, linux_code, pressed as i32)])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_absolute;
+
+    #[test]
+    fn legacy_mac_canvas_maps_to_linux_screen_edges() {
+        assert_eq!(map_absolute(0.0, 0.0, 1920, 1080), Some((0, 0)));
+        assert_eq!(map_absolute(2559.0, 1439.0, 1920, 1080), Some((1919, 1079)));
+        assert_eq!(map_absolute(1280.0, 720.0, 1920, 1080), Some((960, 540)));
+    }
+
+    #[test]
+    fn invalid_positions_are_ignored_and_edges_clamped() {
+        assert_eq!(map_absolute(f64::NAN, 1.0, 1920, 1080), None);
+        assert_eq!(map_absolute(1.0, f64::INFINITY, 1920, 1080), None);
+        assert_eq!(map_absolute(1.0, 1.0, 0, 1080), None);
+        assert_eq!(map_absolute(-5.0, 9000.0, 1920, 1080), Some((0, 1079)));
     }
 }

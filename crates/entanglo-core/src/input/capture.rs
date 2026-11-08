@@ -12,6 +12,7 @@
 
 use crate::protocol::keymap;
 use crate::protocol::payloads::input_event::{InputEventKind, InputEventMessage};
+use std::time::{Duration, Instant};
 
 use super::modifiers::ModifierState;
 
@@ -22,12 +23,31 @@ use super::modifiers::ModifierState;
 /// `net::coordinator::ConnectionCoordinator`.
 pub struct InputCaptureService {
     modifiers: ModifierState,
+    buttons_held: u8,
+    pointer_x: i64,
+    pointer_y: i64,
+    clicks: [ClickTracker; 3],
 }
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClickTracker {
+    last_press: Option<Instant>,
+    last_x: i64,
+    last_y: i64,
+    count: u8,
+}
+
+const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const MULTI_CLICK_MOTION_TOLERANCE: i64 = 8;
 
 impl InputCaptureService {
     pub fn new() -> Self {
         Self {
             modifiers: ModifierState::default(),
+            buttons_held: 0,
+            pointer_x: 0,
+            pointer_y: 0,
+            clicks: [ClickTracker::default(); 3],
         }
     }
 
@@ -66,9 +86,20 @@ impl InputCaptureService {
     /// regular `keyDown`/`keyUp` frame — modifiers are ordinary keys
     /// on the wire, per `PROTOCOL.md` §5.5.
     pub fn translate(&mut self, event: evdev::InputEvent) -> Option<InputEventMessage> {
+        self.translate_at(event, Instant::now())
+    }
+
+    fn translate_at(
+        &mut self,
+        event: evdev::InputEvent,
+        now: Instant,
+    ) -> Option<InputEventMessage> {
         match event.kind() {
             evdev::InputEventKind::Key(key) => {
-                let pressed = event.value() != 0;
+                if event.value() == 2 {
+                    return None;
+                }
+                let pressed = event.value() == 1;
                 let linux_code = key.code();
 
                 // Mouse buttons (BTN_LEFT/RIGHT/MIDDLE) arrive as
@@ -80,6 +111,7 @@ impl InputCaptureService {
                     .iter()
                     .find(|(_, btn)| *btn == linux_code)
                 {
+                    let click_state = self.observe_mouse_button(*wire_button, pressed, now);
                     return Some(InputEventMessage {
                         kind: if pressed {
                             InputEventKind::MouseDown
@@ -95,7 +127,7 @@ impl InputCaptureService {
                         media_key: None,
                         modifier_flags: self.modifiers.to_bitmask(),
                         pressed: Some(pressed),
-                        click_state: Some(1),
+                        click_state: Some(click_state),
                     });
                 }
 
@@ -122,8 +154,14 @@ impl InputCaptureService {
             evdev::InputEventKind::RelAxis(axis) => {
                 let delta = event.value() as f64;
                 let (delta_x, delta_y) = match axis {
-                    evdev::RelativeAxisType::REL_X => (Some(delta), None),
-                    evdev::RelativeAxisType::REL_Y => (None, Some(delta)),
+                    evdev::RelativeAxisType::REL_X => {
+                        self.pointer_x += event.value() as i64;
+                        (Some(delta), None)
+                    }
+                    evdev::RelativeAxisType::REL_Y => {
+                        self.pointer_y += event.value() as i64;
+                        (None, Some(delta))
+                    }
                     evdev::RelativeAxisType::REL_WHEEL => {
                         return Some(InputEventMessage {
                             kind: InputEventKind::Scroll,
@@ -141,22 +179,54 @@ impl InputCaptureService {
                     }
                     _ => return None,
                 };
+                let active_button = (0..3)
+                    .find(|button| self.buttons_held & (1 << button) != 0)
+                    .map(|button| button as u8);
                 Some(InputEventMessage {
                     kind: InputEventKind::MouseMove,
                     x: None,
                     y: None,
                     delta_x,
                     delta_y,
-                    button: None,
+                    button: active_button,
                     key_code: None,
                     media_key: None,
                     modifier_flags: self.modifiers.to_bitmask(),
-                    pressed: None,
+                    pressed: active_button.map(|_| true),
                     click_state: None,
                 })
             }
             _ => None,
         }
+    }
+
+    fn observe_mouse_button(&mut self, button: u8, pressed: bool, now: Instant) -> u8 {
+        let mask = 1 << button;
+        let Some(tracker) = self.clicks.get_mut(button as usize) else {
+            return 1;
+        };
+
+        if pressed {
+            self.buttons_held |= mask;
+            let close_in_time = tracker
+                .last_press
+                .is_some_and(|last| now.duration_since(last) <= MULTI_CLICK_INTERVAL);
+            let close_in_space = (self.pointer_x - tracker.last_x).abs()
+                <= MULTI_CLICK_MOTION_TOLERANCE
+                && (self.pointer_y - tracker.last_y).abs() <= MULTI_CLICK_MOTION_TOLERANCE;
+            tracker.count = if close_in_time && close_in_space {
+                tracker.count.saturating_add(1).min(3)
+            } else {
+                1
+            };
+            tracker.last_press = Some(now);
+            tracker.last_x = self.pointer_x;
+            tracker.last_y = self.pointer_y;
+        } else {
+            self.buttons_held &= !mask;
+        }
+
+        tracker.count.max(1)
     }
 }
 
@@ -206,5 +276,68 @@ mod tests {
         assert_eq!(msg.kind, InputEventKind::KeyDown);
         assert_eq!(msg.key_code, Some(0)); // macOS virtual key code for 'A'
         assert_eq!(msg.button, None);
+    }
+
+    #[test]
+    fn second_nearby_click_is_marked_as_double_click() {
+        let mut capture = InputCaptureService::new();
+        let start = Instant::now();
+        let down = || InputEvent::new(EventType::KEY, 0x110 /* BTN_LEFT */, 1);
+        let up = || InputEvent::new(EventType::KEY, 0x110 /* BTN_LEFT */, 0);
+
+        assert_eq!(
+            capture.translate_at(down(), start).unwrap().click_state,
+            Some(1)
+        );
+        assert_eq!(
+            capture.translate_at(up(), start).unwrap().click_state,
+            Some(1)
+        );
+        assert_eq!(
+            capture
+                .translate_at(down(), start + Duration::from_millis(120))
+                .unwrap()
+                .click_state,
+            Some(2)
+        );
+        assert_eq!(
+            capture
+                .translate_at(up(), start + Duration::from_millis(140))
+                .unwrap()
+                .click_state,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn held_primary_button_marks_motion_as_drag() {
+        let mut capture = InputCaptureService::new();
+        let start = Instant::now();
+        capture.translate_at(
+            InputEvent::new(EventType::KEY, 0x110 /* BTN_LEFT */, 1),
+            start,
+        );
+        let drag = capture
+            .translate_at(
+                InputEvent::new(EventType::RELATIVE, evdev::RelativeAxisType::REL_X.0, 4),
+                start + Duration::from_millis(10),
+            )
+            .unwrap();
+        assert_eq!(drag.kind, InputEventKind::MouseMove);
+        assert_eq!(drag.button, Some(0));
+        assert_eq!(drag.pressed, Some(true));
+
+        capture.translate_at(
+            InputEvent::new(EventType::KEY, 0x110 /* BTN_LEFT */, 0),
+            start + Duration::from_millis(20),
+        );
+        let hover = capture
+            .translate_at(
+                InputEvent::new(EventType::RELATIVE, evdev::RelativeAxisType::REL_X.0, 4),
+                start + Duration::from_millis(30),
+            )
+            .unwrap();
+        assert_eq!(hover.button, None);
+        assert_eq!(hover.pressed, None);
     }
 }

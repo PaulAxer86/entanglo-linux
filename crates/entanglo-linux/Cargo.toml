@@ -22,6 +22,7 @@ tracing = "0.1"
 async-channel = "2"
 uuid = { version = "1", features = ["v4"] }
 x11rb = "0.13"
+libc = "0.2"
 
 [package.metadata.deb]
 maintainer = "Paolo Asara <paolo.asara86@gmail.com>"
@@ -35,4 +36,12 @@ assets = [
     ["data/com.paoloasara.Entanglo.desktop", "usr/share/applications/", "644"],
     ["data/com.paoloasara.Entanglo.metainfo.xml", "usr/share/metainfo/", "644"],
     ["../../packaging/60-entanglo-uinput.rules", "lib/udev/rules.d/", "644"],
+    ["../../packaging/entanglo-uinput.conf", "usr/lib/modules-load.d/", "644"],
+    ["data/icons/hicolor/16x16/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["data/icons/hicolor/32x32/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["data/icons/hicolor/64x64/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["data/icons/hicolor/128x128/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["data/icons/hicolor/256x256/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["data/icons/hicolor/512x512/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["data/icons/hicolor/1024x1024/apps/com.paoloasara.Entanglo.png", "usr/share/icons/hicolor/1024x1024/apps/", "644"],
 ]

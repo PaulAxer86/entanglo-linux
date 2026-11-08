@@ -1,0 +1,27 @@
+Entanglo for Debian 13 amd64 / X11
+
+Run ./install-entanglo.sh as your desktop user. Open Entanglo from the menu.
+Alternatively: sudo apt install ./entanglo-linux_VERSION_amd64.deb
+Then: sudo usermod -aG input "$USER"
+
+Trust your Mac in Devices. Enable the Controller role and input sharing on
+the Mac. The Linux app is a receiver by default. Files from trusted Entanglo
+devices are received in Downloads/Entanglo without overwriting existing files.
+
+Desktop and terminal launches automatically apply existing input-group
+membership. Device identity and trust persist through updates. The listener
+uses stable port 55555; Bonjour is refreshed automatically while disconnected.
+The Dashboard Reconnect button performs the same refresh immediately.
+
+News & Updates checks the Linux release manifest on launch and every hour.
+Install update verifies the downloaded package and restarts the application.
+Personal installs update without administrator privileges. System installs
+use the standard administrator approval prompt.
+
+Closing the window or Ctrl+Q quits. Minimizing keeps sharing active.
+Logs: ~/.local/state/entanglo/last.log
+Source: https://github.com/PaulAxer86/entanglo-linux
+Downloads: https://entanglo.pages.dev/download
+
+Linux-to-Linux controller mode, file sending and printing need further work.
+Use X11 for input reception; Wayland is not supported by the absolute-pointer path.

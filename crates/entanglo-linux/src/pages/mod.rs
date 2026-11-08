@@ -13,6 +13,7 @@ pub mod dashboard;
 pub mod devices;
 pub mod files;
 pub mod input_sharing;
+pub mod layout;
 pub mod logs;
 pub mod network;
 pub mod news_updates;
@@ -81,10 +82,10 @@ pub fn build_all(shared: &Rc<AppShared>) -> HashMap<&'static str, gtk::Widget> {
         ("devices", devices::build(shared)),
         ("pairing", pairing::build(shared)),
         ("input-sharing", input_sharing::build(shared)),
-        ("files", files::build()),
+        ("files", files::build(shared)),
         ("print", print::build()),
         ("network", network::build(shared)),
-        ("news-updates", news_updates::build()),
+        ("news-updates", news_updates::build(shared)),
         ("settings", settings::build(shared)),
         ("logs", logs::build(shared)),
     ])

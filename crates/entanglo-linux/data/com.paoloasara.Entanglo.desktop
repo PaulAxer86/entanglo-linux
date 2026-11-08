@@ -7,3 +7,4 @@ Icon=com.paoloasara.Entanglo
 Terminal=false
 Categories=Network;RemoteAccess;
 StartupNotify=true
+StartupWMClass=entanglo-linux

@@ -44,3 +44,32 @@ impl Default for ClipboardSyncService {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_is_opt_in() {
+        let service = ClipboardSyncService::new();
+        assert!(service.build_payload("private text").is_none());
+    }
+
+    #[test]
+    fn enabled_clipboard_preserves_text_under_the_limit() {
+        let mut service = ClipboardSyncService::new();
+        service.set_enabled(true);
+        assert_eq!(service.build_payload("hello").unwrap().text, "hello");
+    }
+
+    #[test]
+    fn truncation_keeps_valid_utf8_at_one_mib() {
+        let mut service = ClipboardSyncService::new();
+        service.set_enabled(true);
+        let text = format!("{}€", "a".repeat(MAX_CLIPBOARD_TEXT_BYTES - 1));
+        let payload = service.build_payload(&text).unwrap();
+        assert!(payload.text.len() <= MAX_CLIPBOARD_TEXT_BYTES);
+        assert!(payload.text.is_char_boundary(payload.text.len()));
+        assert_eq!(payload.text, "a".repeat(MAX_CLIPBOARD_TEXT_BYTES - 1));
+    }
+}

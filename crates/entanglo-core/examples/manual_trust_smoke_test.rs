@@ -33,6 +33,8 @@ async fn main() {
         app_version: "0.0.0-smoketest".to_string(),
         roles: vec!["controller".to_string(), "receiver".to_string()],
         platform: Some("Linux".to_string()),
+        screen_width: Some(1920),
+        screen_height: Some(1080),
     };
     let trust_store = Arc::new(tokio::sync::Mutex::new(
         TrustStore::load().await.expect("load trust store"),
