@@ -120,9 +120,11 @@ pub const MAC_TO_LINUX: &[(u16, u16)] = &[
     (81, 117), // Keypad = -> KEY_KPEQUAL
 ];
 
-/// Linux keypad keys that act as navigation unless NumLock is on, paired with
-/// the key that always types the same character.
+/// Linux keypad keys whose meaning depends on local state, paired with the key
+/// that always does the same thing. Digits and dot act as navigation unless
+/// NumLock is on, and Mac keyboard layouts turn keypad Enter into AltGr.
 const KEYPAD_TO_MAIN_KEY: &[(u16, u16)] = &[
+    (96, 28), // KEY_KPENTER -> KEY_ENTER
     (82, 11), // KEY_KP0 -> KEY_0
     (79, 2),  // KEY_KP1 -> KEY_1
     (80, 3),  // KEY_KP2 -> KEY_2
@@ -151,8 +153,8 @@ pub fn mac_to_linux(mac_code: u16) -> Option<u16> {
         .map(|(_, linux)| *linux)
 }
 
-/// The key to press on Linux for a received Mac key. Macs have no NumLock, so
-/// keypad digits must type digits whatever this computer's NumLock state is.
+/// The key to press on Linux for a received Mac key, chosen so a keypad key
+/// does what its label says whatever this computer's NumLock or layout.
 pub fn mac_to_linux_for_injection(mac_code: u16) -> Option<u16> {
     let linux_code = mac_to_linux(mac_code)?;
     let main_key = KEYPAD_TO_MAIN_KEY.iter().find(|(keypad, _)| *keypad == linux_code);
@@ -211,10 +213,17 @@ mod tests {
     }
 
     #[test]
-    fn keypad_enter_and_operators_stay_on_the_keypad() {
-        for (mac_code, linux_code) in [(76, 96), (67, 55), (69, 78), (75, 98), (78, 74), (81, 117)] {
+    fn keypad_operators_stay_on_the_keypad() {
+        for (mac_code, linux_code) in [(67, 55), (69, 78), (75, 98), (78, 74), (81, 117)] {
             assert_eq!(mac_to_linux_for_injection(mac_code), Some(linux_code));
         }
+    }
+
+    /// Regression: the X11 `gb(mac)` layout maps keypad Enter to AltGr, so
+    /// injecting KEY_KPENTER did nothing visible on an iMac.
+    #[test]
+    fn keypad_enter_is_injected_as_the_main_enter_key() {
+        assert_eq!(mac_to_linux_for_injection(76), Some(28));
     }
 
     #[test]
