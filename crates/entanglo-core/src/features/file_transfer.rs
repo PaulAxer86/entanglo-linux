@@ -11,6 +11,16 @@ use crate::protocol::payloads::{FileChunkPayload, FileOfferPayload};
 /// the 4 MiB frame limit once base64-encoded inside the message envelope.
 const MAX_CHUNK_BYTES: u32 = 2 * 1024 * 1024;
 
+/// Chunk size this device sends, matching the Mac: small enough that heartbeats
+/// keep flowing between chunks.
+pub const SEND_CHUNK_BYTES: u32 = 512 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    Incoming,
+    Outgoing,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileProgress {
     pub transfer_id: String,
@@ -21,6 +31,7 @@ pub struct FileProgress {
     pub error: Option<String>,
     pub complete: bool,
     pub updated_at: std::time::SystemTime,
+    pub direction: TransferDirection,
 }
 
 struct IncomingTransfer {
@@ -54,9 +65,7 @@ impl FileTransferService {
     }
 
     pub fn begin_incoming(&mut self, offer: FileOfferPayload) -> anyhow::Result<FileProgress> {
-        anyhow::ensure!(!offer.name.is_empty() && offer.name != "." && offer.name != ".."
-            && !offer.name.contains(['/', '\\']) && !offer.name.chars().any(char::is_control)
-            && offer.name.len() <= 240, "Invalid file name");
+        anyhow::ensure!(is_valid_file_name(&offer.name), "Invalid file name");
         anyhow::ensure!(offer.chunk_size > 0 && offer.chunk_size <= MAX_CHUNK_BYTES, "Unsupported chunk size");
         let chunks = offer.size_bytes / u64::from(offer.chunk_size)
             + u64::from(offer.size_bytes % u64::from(offer.chunk_size) != 0);
@@ -71,6 +80,7 @@ impl FileTransferService {
             transfer_id: offer.transfer_id.clone(), name: offer.name.clone(), received: 0,
             total: offer.size_bytes, destination: None, error: None, complete: false,
             updated_at: std::time::SystemTime::now(),
+            direction: TransferDirection::Incoming,
         };
         self.incoming.insert(offer.transfer_id.clone(), IncomingTransfer { offer, file, temporary, received: 0, next_sequence: 0 });
         Ok(progress)
@@ -95,6 +105,7 @@ impl FileTransferService {
             received: transfer.received, total: transfer.offer.size_bytes,
             destination: None, error: None, complete,
             updated_at: std::time::SystemTime::now(),
+            direction: TransferDirection::Incoming,
         };
         if complete {
             anyhow::ensure!(transfer.received == transfer.offer.size_bytes, "Incomplete file");
@@ -105,6 +116,20 @@ impl FileTransferService {
         }
         Ok(progress)
     }
+}
+
+fn is_valid_file_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".."
+        && !name.contains(['/', '\\']) && !name.chars().any(char::is_control)
+        && name.len() <= 240
+}
+
+/// The offer describing a file about to be sent.
+pub fn outgoing_offer(transfer_id: String, name: String, size_bytes: u64) -> anyhow::Result<FileOfferPayload> {
+    anyhow::ensure!(is_valid_file_name(&name), "This file name cannot be sent");
+    let total_chunks = u32::try_from(size_bytes.div_ceil(u64::from(SEND_CHUNK_BYTES)).max(1))
+        .map_err(|_| anyhow::anyhow!("File is too large to send"))?;
+    Ok(FileOfferPayload { transfer_id, name, size_bytes, total_chunks, chunk_size: SEND_CHUNK_BYTES, kind: None })
 }
 
 fn publish_unique(temporary: &Path, directory: &Path, name: &str) -> std::io::Result<PathBuf> {
@@ -156,6 +181,14 @@ mod tests {
         assert!(service.apply_chunk(&chunk(0,b"ab")).is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(),0);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn outgoing_offers_match_what_receivers_validate() {
+        let chunk = u64::from(SEND_CHUNK_BYTES);
+        assert_eq!(outgoing_offer("a".into(), "f".into(), 0).unwrap().total_chunks, 1);
+        assert_eq!(outgoing_offer("a".into(), "f".into(), chunk).unwrap().total_chunks, 1);
+        assert_eq!(outgoing_offer("a".into(), "f".into(), chunk + 1).unwrap().total_chunks, 2);
+        assert!(outgoing_offer("a".into(), "../f".into(), 1).is_err());
     }
     #[test]
     fn accepts_windows_chunk_size_and_rejects_larger_chunks() {

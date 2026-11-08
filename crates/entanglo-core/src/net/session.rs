@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::features::file_transfer::{FileProgress, FileTransferService};
+use crate::features::file_transfer::{FileProgress, FileTransferService, TransferDirection};
 use crate::protocol::envelope::unix_timestamp_now;
 use crate::protocol::message_type::MessageType;
 use crate::protocol::payloads::{
@@ -45,6 +45,13 @@ pub enum OutgoingMessage {
     Input(InputEventMessage),
     ReleaseControl(ReleaseControlPayload),
     ClipboardText(ClipboardTextPayload),
+    FileOffer(FileOfferPayload),
+    /// `written` fires once the chunk has reached the socket, so a sender
+    /// waiting on it never queues more of a file than the network can take.
+    FileChunk {
+        payload: FileChunkPayload,
+        written: tokio::sync::oneshot::Sender<()>,
+    },
     /// Locally trust this peer right now, without waiting for a
     /// `pairRequest`/`pairResponse` round trip. Exists because the
     /// real `entanglo-macos` v0.1.58 turns out not to implement that
@@ -106,6 +113,7 @@ pub enum SessionEvent {
         text: String,
     },
     FileTransfer(FileProgress),
+    FileAck(FileAckPayload),
     ReleaseControl {
         reason: String,
     },
@@ -348,6 +356,7 @@ pub async fn run_session(
                                             received: 0, total: offer.size_bytes, destination: None,
                                             complete: false, error: Some(reason.clone()),
                                             updated_at: std::time::SystemTime::now(),
+                                            direction: TransferDirection::Incoming,
                                         }));
                                     }
                                     let ack = FileAckPayload { transfer_id: offer.transfer_id, ok: false, failure_reason: Some(reason) };
@@ -356,10 +365,20 @@ pub async fn run_session(
                             }
                         }
                     }
+                    MessageType::FileAck => {
+                        if trusted {
+                            if let Ok(ack) = msg.decode_payload::<FileAckPayload>() {
+                                let _ = events_tx.send(SessionEvent::FileAck(ack));
+                            }
+                        }
+                    }
                     MessageType::FileChunk => {
                         if let Ok(chunk) = msg.decode_payload::<FileChunkPayload>() {
                             let result = if trusted { files.apply_chunk(&chunk) }
                                 else { Err(anyhow::anyhow!("Device is not trusted")) };
+                            // Writing to a slow disk blocks this loop, and that
+                            // time must not count as a silent peer.
+                            last_traffic = Instant::now();
                             match result {
                                 Ok(progress) => {
                                     if progress.complete {
@@ -381,6 +400,7 @@ pub async fn run_session(
                                             received: 0, total: 0, destination: None,
                                             complete: false, error: Some(reason.clone()),
                                             updated_at: std::time::SystemTime::now(),
+                                            direction: TransferDirection::Incoming,
                                         }));
                                     }
                                     let ack = FileAckPayload { transfer_id: chunk.transfer_id, ok: false, failure_reason: Some(reason) };
@@ -465,9 +485,18 @@ pub async fn run_session(
                     OutgoingMessage::ClipboardText(payload) if trusted => {
                         send(&mut transport, &config, MessageType::ClipboardText, &payload).await?;
                     }
+                    OutgoingMessage::FileOffer(payload) if trusted => {
+                        send(&mut transport, &config, MessageType::FileOffer, &payload).await?;
+                    }
+                    OutgoingMessage::FileChunk { payload, written } if trusted => {
+                        send(&mut transport, &config, MessageType::FileChunk, &payload).await?;
+                        let _ = written.send(());
+                    }
                     OutgoingMessage::Input(_)
                     | OutgoingMessage::ReleaseControl(_)
-                    | OutgoingMessage::ClipboardText(_) => {
+                    | OutgoingMessage::ClipboardText(_)
+                    | OutgoingMessage::FileOffer(_)
+                    | OutgoingMessage::FileChunk { .. } => {
                         // Not trusted yet — silently dropped, matching
                         // the previous `if trusted` guard's behavior.
                     }

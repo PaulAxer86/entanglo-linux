@@ -14,16 +14,21 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::features::clipboard::ClipboardSyncService;
+use crate::features::file_transfer::{outgoing_offer, FileProgress, TransferDirection, SEND_CHUNK_BYTES};
 use crate::input::{InputCaptureService, InputInjectionService};
 use crate::protocol::payloads::{
-    HelloPayload, InputEventMessage, PairRequestPayload, ReleaseControlPayload,
+    FileAckPayload, FileChunkPayload, HelloPayload, InputEventMessage, PairRequestPayload,
+    ReleaseControlPayload,
 };
 
 use super::session::{run_session, OutgoingMessage, SessionConfig, SessionEvent};
@@ -43,6 +48,13 @@ pub enum RemoteEntryEdge {
     Top,
     Bottom,
 }
+
+/// The receiver flushes the whole file to disk before acknowledging it.
+const FILE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Pause between chunks, matching the Mac and Windows senders.
+const FILE_CHUNK_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+const FILE_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const CONNECTION_LOST: &str = "Connection closed before transfer completed";
 
 const FALLBACK_REMOTE_SCREEN_WIDTH: f64 = 2560.0;
 const FALLBACK_REMOTE_SCREEN_HEIGHT: f64 = 1440.0;
@@ -155,6 +167,12 @@ impl RemoteCursorState {
     }
 }
 
+fn file_ack_outcome(ack: Result<FileAckPayload, oneshot::error::RecvError>) -> anyhow::Result<()> {
+    let ack = ack.map_err(|_| anyhow::anyhow!(CONNECTION_LOST))?;
+    anyhow::ensure!(ack.ok, ack.failure_reason.unwrap_or_else(|| "The device rejected the file".into()));
+    Ok(())
+}
+
 fn peer_screen_size(hello: &HelloPayload) -> Option<(f64, f64)> {
     hello.screen_size()
 }
@@ -213,6 +231,10 @@ pub enum CoordinatorEvent {
     FileTransfer {
         conn_id: ConnId,
         progress: crate::features::file_transfer::FileProgress,
+    },
+    FileAck {
+        conn_id: ConnId,
+        ack: FileAckPayload,
     },
     ReleaseControl {
         conn_id: ConnId,
@@ -295,6 +317,7 @@ pub struct Coordinator {
     being_controlled_by: Mutex<Option<ConnId>>,
     preferred_controller: std::sync::Mutex<Option<String>>,
     discovery_attempts: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    pending_file_acks: std::sync::Mutex<HashMap<String, oneshot::Sender<FileAckPayload>>>,
 }
 
 impl Coordinator {
@@ -326,6 +349,7 @@ impl Coordinator {
             being_controlled_by: Mutex::new(None),
             preferred_controller: std::sync::Mutex::new(super::trust_store::preferred_controller()),
             discovery_attempts: Mutex::new(std::collections::HashMap::new()),
+            pending_file_acks: std::sync::Mutex::new(HashMap::new()),
         });
         (coordinator, events_rx)
     }
@@ -584,6 +608,9 @@ impl Coordinator {
                         *this.remote_cursor.lock().unwrap() = None;
                     }
                 }
+                if let SessionEvent::FileAck(ref ack) = event {
+                    this.deliver_file_ack(ack.clone());
+                }
                 let _ = this.events_tx.send(translate(conn_id, event));
                 if closed {
                     break;
@@ -653,6 +680,101 @@ impl Coordinator {
             let _ = handle
                 .outgoing_tx
                 .send(OutgoingMessage::ClipboardText(payload.clone()));
+        }
+    }
+
+    /// Sends `paths` to a trusted peer one after another, reporting progress
+    /// through `CoordinatorEvent::FileTransfer`.
+    pub fn send_files(self: &Arc<Self>, conn_id: ConnId, paths: Vec<PathBuf>) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            for path in paths {
+                this.send_file(conn_id, &path).await;
+            }
+        });
+    }
+
+    async fn send_file(&self, conn_id: ConnId, path: &Path) {
+        let mut progress = FileProgress {
+            transfer_id: uuid::Uuid::new_v4().to_string(),
+            name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            received: 0,
+            total: 0,
+            destination: None,
+            error: None,
+            complete: false,
+            updated_at: std::time::SystemTime::now(),
+            direction: TransferDirection::Outgoing,
+        };
+        self.report_outgoing(conn_id, &progress);
+        match self.stream_file(conn_id, path, &mut progress).await {
+            Ok(()) => {
+                progress.received = progress.total;
+                progress.complete = true;
+                tracing::info!(name = %progress.name, bytes = progress.total, "file sent");
+            }
+            Err(error) => {
+                tracing::warn!(name = %progress.name, %error, "file send failed");
+                progress.error = Some(error.to_string());
+            }
+        }
+        self.pending_file_acks.lock().unwrap().remove(&progress.transfer_id);
+        progress.updated_at = std::time::SystemTime::now();
+        self.report_outgoing(conn_id, &progress);
+    }
+
+    async fn stream_file(&self, conn_id: ConnId, path: &Path, progress: &mut FileProgress) -> anyhow::Result<()> {
+        let mut file = tokio::fs::File::open(path).await?;
+        let metadata = file.metadata().await?;
+        anyhow::ensure!(metadata.is_file(), "Folders cannot be sent");
+        progress.total = metadata.len();
+        let offer = outgoing_offer(progress.transfer_id.clone(), progress.name.clone(), progress.total)?;
+        let outgoing = self.peers.lock().await.get(&conn_id).map(|peer| peer.outgoing_tx.clone())
+            .ok_or_else(|| anyhow::anyhow!(CONNECTION_LOST))?;
+
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        self.pending_file_acks.lock().unwrap().insert(progress.transfer_id.clone(), ack_tx);
+        let total_chunks = offer.total_chunks;
+        outgoing.send(OutgoingMessage::FileOffer(offer)).map_err(|_| anyhow::anyhow!(CONNECTION_LOST))?;
+        tracing::info!(name = %progress.name, bytes = progress.total, "sending file");
+
+        let mut last_report = std::time::Instant::now();
+        for sequence in 0..total_chunks {
+            let length = (progress.total - progress.received).min(u64::from(SEND_CHUNK_BYTES)) as usize;
+            let mut bytes = vec![0; length];
+            file.read_exact(&mut bytes).await.map_err(|_| anyhow::anyhow!("The file changed while it was being sent"))?;
+            let (written_tx, written_rx) = oneshot::channel();
+            let payload = FileChunkPayload {
+                transfer_id: progress.transfer_id.clone(),
+                sequence,
+                data: STANDARD.encode(&bytes),
+            };
+            outgoing.send(OutgoingMessage::FileChunk { payload, written: written_tx })
+                .map_err(|_| anyhow::anyhow!(CONNECTION_LOST))?;
+            tokio::select! {
+                written = written_rx => written.map_err(|_| anyhow::anyhow!(CONNECTION_LOST))?,
+                // A receiver that gives up answers before the last chunk.
+                ack = &mut ack_rx => return file_ack_outcome(ack),
+            }
+            progress.received += length as u64;
+            if last_report.elapsed() >= FILE_PROGRESS_INTERVAL {
+                last_report = std::time::Instant::now();
+                self.report_outgoing(conn_id, progress);
+            }
+            tokio::time::sleep(FILE_CHUNK_PAUSE).await;
+        }
+        let ack = tokio::time::timeout(FILE_ACK_TIMEOUT, ack_rx).await
+            .map_err(|_| anyhow::anyhow!("The device did not confirm the file"))?;
+        file_ack_outcome(ack)
+    }
+
+    fn report_outgoing(&self, conn_id: ConnId, progress: &FileProgress) {
+        let _ = self.events_tx.send(CoordinatorEvent::FileTransfer { conn_id, progress: progress.clone() });
+    }
+
+    fn deliver_file_ack(&self, ack: FileAckPayload) {
+        if let Some(waiting) = self.pending_file_acks.lock().unwrap().remove(&ack.transfer_id) {
+            let _ = waiting.send(ack);
         }
     }
 
@@ -867,6 +989,7 @@ fn translate(conn_id: ConnId, event: SessionEvent) -> CoordinatorEvent {
         SessionEvent::InputEvent(event) => CoordinatorEvent::InputEvent { conn_id, event },
         SessionEvent::ClipboardText { text } => CoordinatorEvent::ClipboardText { conn_id, text },
         SessionEvent::FileTransfer(progress) => CoordinatorEvent::FileTransfer { conn_id, progress },
+        SessionEvent::FileAck(ack) => CoordinatorEvent::FileAck { conn_id, ack },
         SessionEvent::ReleaseControl { reason } => {
             CoordinatorEvent::ReleaseControl { conn_id, reason }
         }
@@ -1086,6 +1209,112 @@ mod tests {
         assert!(cursor.observe(&mut sample_delta_event(0.0, -11.0)));
     }
 
+    async fn coordinator_with_fake_peer() -> (
+        Arc<Coordinator>,
+        mpsc::UnboundedReceiver<CoordinatorEvent>,
+        mpsc::UnboundedReceiver<OutgoingMessage>,
+    ) {
+        let (coordinator, events) =
+            Coordinator::new("local".into(), hello("Local"), empty_trust_store().await);
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        coordinator.peers.lock().await.insert(
+            42,
+            PeerHandle { outgoing_tx, device_id: Some("peer".into()), screen_size: None, is_linux: false },
+        );
+        (coordinator, events, outgoing_rx)
+    }
+
+    fn temporary_directory() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("entanglo-send-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    async fn final_file_progress(events: &mut mpsc::UnboundedReceiver<CoordinatorEvent>) -> FileProgress {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await.expect("no final progress").expect("events closed");
+            if let CoordinatorEvent::FileTransfer { progress, .. } = event {
+                if progress.complete || progress.error.is_some() {
+                    return progress;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sent_file_arrives_intact_and_completes_on_ack() {
+        use crate::features::file_transfer::FileTransferService;
+
+        let (coordinator, mut events, mut outgoing) = coordinator_with_fake_peer().await;
+        let directory = temporary_directory();
+        let source = directory.join("source.bin");
+        let bytes: Vec<u8> = (0..1_200_000u32).map(|value| value as u8).collect();
+        std::fs::write(&source, &bytes).unwrap();
+        let received = directory.join("received");
+        let mut receiver = FileTransferService::in_directory(received.clone());
+
+        coordinator.send_files(42, vec![source]);
+        let destination = loop {
+            match outgoing.recv().await.expect("session closed") {
+                OutgoingMessage::FileOffer(offer) => {
+                    assert_eq!(offer.total_chunks, 3);
+                    receiver.begin_incoming(offer).unwrap();
+                }
+                OutgoingMessage::FileChunk { payload, written } => {
+                    let progress = receiver.apply_chunk(&payload).unwrap();
+                    written.send(()).unwrap();
+                    if progress.complete {
+                        coordinator.deliver_file_ack(FileAckPayload {
+                            transfer_id: payload.transfer_id, ok: true, failure_reason: None,
+                        });
+                        break progress.destination.unwrap();
+                    }
+                }
+                other => panic!("unexpected message {other:?}"),
+            }
+        };
+
+        assert_eq!(std::fs::read(destination).unwrap(), bytes);
+        let progress = final_file_progress(&mut events).await;
+        assert!(progress.complete && progress.error.is_none());
+        assert_eq!(progress.direction, TransferDirection::Outgoing);
+        assert_eq!(progress.received, 1_200_000);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn receiver_rejection_fails_the_transfer_with_its_reason() {
+        let (coordinator, mut events, mut outgoing) = coordinator_with_fake_peer().await;
+        let directory = temporary_directory();
+        let source = directory.join("source.bin");
+        std::fs::write(&source, vec![1; 1_200_000]).unwrap();
+
+        coordinator.send_files(42, vec![source]);
+        match outgoing.recv().await.unwrap() {
+            OutgoingMessage::FileOffer(offer) => coordinator.deliver_file_ack(FileAckPayload {
+                transfer_id: offer.transfer_id, ok: false, failure_reason: Some("Disk full".into()),
+            }),
+            other => panic!("unexpected message {other:?}"),
+        }
+
+        assert_eq!(final_file_progress(&mut events).await.error.as_deref(), Some("Disk full"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn folders_and_missing_files_fail_without_reaching_the_peer() {
+        let (coordinator, mut events, mut outgoing) = coordinator_with_fake_peer().await;
+        let directory = temporary_directory();
+
+        coordinator.send_files(42, vec![directory.clone()]);
+        assert!(final_file_progress(&mut events).await.error.is_some());
+        coordinator.send_files(42, vec![directory.join("missing")]);
+        assert!(final_file_progress(&mut events).await.error.is_some());
+        assert!(outgoing.try_recv().is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn linux_receivers_get_coordinates_on_their_fixed_canvas() {
         let mut cursor = RemoteCursorState::new(7, RemoteEntryEdge::Left, 1920.0, 1080.0)
@@ -1207,6 +1436,34 @@ mod tests {
 
         assert_eq!(coordinator_a.known_device_ids().await, vec!["device-b"]);
         assert_eq!(coordinator_b.known_device_ids().await, vec!["device-a"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_travels_between_coordinators_over_tcp() {
+        let directory = temporary_directory();
+        let old_download = std::env::var_os("XDG_DOWNLOAD_DIR");
+        std::env::set_var("XDG_DOWNLOAD_DIR", directory.join("downloads"));
+        let (coordinator_a, _coordinator_b, mut relay_a_rx, mut relay_b_rx) =
+            paired_coordinators().await;
+        if let Some(old) = old_download {
+            std::env::set_var("XDG_DOWNLOAD_DIR", old);
+        } else {
+            std::env::remove_var("XDG_DOWNLOAD_DIR");
+        }
+
+        let source = directory.join("report.bin");
+        let bytes: Vec<u8> = (0..1_700_000u32).map(|value| (value % 251) as u8).collect();
+        std::fs::write(&source, &bytes).unwrap();
+        let conn_id = coordinator_a.active_receiver().await.expect("peer selected");
+        coordinator_a.send_files(conn_id, vec![source]);
+
+        let sent = final_file_progress(&mut relay_a_rx).await;
+        assert_eq!(sent.error, None);
+        assert!(sent.complete);
+        let received = final_file_progress(&mut relay_b_rx).await;
+        assert_eq!(received.direction, TransferDirection::Incoming);
+        assert_eq!(std::fs::read(received.destination.unwrap()).unwrap(), bytes);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

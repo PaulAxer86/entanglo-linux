@@ -20,6 +20,7 @@ pub enum Cue {
     Disconnected,
     Error,
     FileReceived,
+    FileSent,
 }
 
 impl Cue {
@@ -29,6 +30,7 @@ impl Cue {
             Cue::Disconnected => "network-connectivity-lost.oga",
             Cue::Error => "dialog-error.oga",
             Cue::FileReceived => "complete.oga",
+            Cue::FileSent => "message.oga",
         }
     }
 }

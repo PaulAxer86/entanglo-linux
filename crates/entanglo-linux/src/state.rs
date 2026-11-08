@@ -17,6 +17,8 @@ use entanglo_core::protocol::payloads::PairRequestPayload;
 
 use crate::app_state::Backend;
 use crate::clipboard::ClipboardBridge;
+use entanglo_core::features::file_transfer::TransferDirection;
+
 use crate::edge::{EdgeAssignments, EdgeTarget, ScreenEdge};
 use crate::sound::{Cue, SoundPlayer};
 
@@ -145,7 +147,9 @@ impl AppShared {
     }
 
     pub fn recent_transfers(&self) -> Vec<entanglo_core::features::file_transfer::FileProgress> {
-        self.transfers.borrow().iter().take(3).map(|(_, progress)| progress.clone()).collect()
+        self.transfers.borrow().iter()
+            .filter(|(_, progress)| progress.direction == TransferDirection::Incoming)
+            .take(3).map(|(_, progress)| progress.clone()).collect()
     }
 
     /// Looks up which trusted peer (if any) is assigned to `edge` —
@@ -172,6 +176,25 @@ impl AppShared {
         if let Err(error) = trust_store::write_setting(EDGE_SETTING, &crate::edge::serialize_assignments(&assignments)) {
             tracing::warn!(%error, "could not save edge assignments");
         }
+    }
+
+    /// Trusted, connected devices, which can all receive files.
+    pub fn file_targets(&self) -> Vec<EdgeTarget> {
+        let devices = self.devices.borrow();
+        device_groups(&devices).into_iter().filter_map(|group| {
+            let id = group.iter().find(|id| devices[id].trusted)?;
+            Some(EdgeTarget { device_id: devices[id].device_id.clone()?, name: devices[id].name.clone() })
+        }).collect()
+    }
+
+    pub fn send_files(&self, device_id: &str, paths: Vec<std::path::PathBuf>) {
+        let conn_id = self.devices.borrow().iter()
+            .filter(|(_, row)| row.trusted && row.device_id.as_deref() == Some(device_id))
+            .map(|(conn_id, _)| *conn_id)
+            .min();
+        let Some(conn_id) = conn_id else { return };
+        let coordinator = Arc::clone(&self.backend.coordinator);
+        self.backend.handle.spawn(async move { coordinator.send_files(conn_id, paths) });
     }
 
     /// Trusted, connected devices that accept remote input.
@@ -319,7 +342,11 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             if progress.error.is_some() {
                 shared.sounds.play(Cue::Error);
             } else if progress.complete {
-                shared.sounds.play(Cue::FileReceived);
+                shared.sounds.play(if progress.direction == TransferDirection::Outgoing {
+                    Cue::FileSent
+                } else {
+                    Cue::FileReceived
+                });
             }
             let mut transfers = shared.transfers.borrow_mut();
             if let Some((_, previous)) = transfers.iter_mut().find(|(owner, item)| *owner == conn_id && item.transfer_id == progress.transfer_id) {
@@ -347,7 +374,9 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
         // `Coordinator::spawn_peer`'s relay loop), so there's nothing
         // for the UI to do with it today besides eventually showing
         // it happened.
-        CoordinatorEvent::InputEvent { .. } | CoordinatorEvent::ReleaseControl { .. } => {}
+        CoordinatorEvent::InputEvent { .. }
+        | CoordinatorEvent::ReleaseControl { .. }
+        | CoordinatorEvent::FileAck { .. } => {}
     }
 }
 
@@ -544,7 +573,7 @@ fn redraw_files(shared: &Rc<AppShared>) {
     clear(&shared.files_list);
     let transfers = shared.transfers.borrow();
     if transfers.is_empty() {
-        let empty = gtk::Label::new(Some("No incoming files yet. Send a file from a trusted Entanglo device."));
+        let empty = gtk::Label::new(Some("No files yet. Files you send or receive appear here."));
         empty.set_wrap(true);
         empty.set_margin_top(18);
         empty.set_margin_bottom(18);
@@ -567,8 +596,9 @@ fn redraw_files(shared: &Rc<AppShared>) {
         }
         row.set_hexpand(true);
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        let direction = gtk::Image::from_icon_name("go-down-symbolic");
-        direction.set_tooltip_text(Some("Received"));
+        let outgoing = progress.direction == TransferDirection::Outgoing;
+        let direction = gtk::Image::from_icon_name(if outgoing { "go-up-symbolic" } else { "go-down-symbolic" });
+        direction.set_tooltip_text(Some(if outgoing { "Sent" } else { "Received" }));
         direction.set_valign(gtk::Align::Start);
         direction.set_margin_top(14);
         direction.set_margin_start(12);
@@ -588,10 +618,15 @@ fn format_timestamp(time: std::time::SystemTime) -> String {
 
 fn transfer_summary(progress: &entanglo_core::features::file_transfer::FileProgress, peer: &str, when: &str) -> String {
     let size = glib::format_size(progress.total);
+    let outgoing = progress.direction == TransferDirection::Outgoing;
+    let party = if outgoing { format!("To {peer}") } else { format!("From {peer}") };
     if let Some(error) = &progress.error {
         // A rejected chunk with no earlier offer has no known size.
-        if progress.total == 0 { format!("Failed {when} · From {peer} · {error}") }
-        else { format!("Failed {when} · {size} · From {peer} · {error}") }
+        if progress.total == 0 { format!("Failed {when} · {party} · {error}") }
+        else { format!("Failed {when} · {size} · {party} · {error}") }
+    } else if outgoing {
+        if progress.complete { format!("Sent {when} · {size} · {party}") }
+        else { format!("Sending · {} of {size} · {party}", glib::format_size(progress.received)) }
     } else if let Some(path) = &progress.destination {
         format!("Received {when} · {size} · From {peer} · Saved to {}", path.display())
     } else {
@@ -606,7 +641,8 @@ mod transfer_summary_tests {
 
     fn progress(total: u64) -> FileProgress {
         FileProgress { transfer_id: "id".into(), name: "a.png".into(), received: total, total,
-            destination: None, error: None, complete: false, updated_at: std::time::UNIX_EPOCH }
+            destination: None, error: None, complete: false, updated_at: std::time::UNIX_EPOCH,
+            direction: TransferDirection::Incoming }
     }
 
     #[test]
@@ -618,6 +654,16 @@ mod transfer_summary_tests {
         assert!(text.starts_with("Received 8 Nov 2026, 13:00 · "));
         assert!(text.contains(glib::format_size(5_000_000).as_str()));
         assert!(text.contains("From iMac"));
+    }
+
+    #[test]
+    fn sent_file_names_the_recipient() {
+        let mut item = progress(5_000_000);
+        item.direction = TransferDirection::Outgoing;
+        item.complete = true;
+        let text = transfer_summary(&item, "iMac", "8 Nov 2026, 13:00");
+        assert!(text.starts_with("Sent 8 Nov 2026, 13:00 · "));
+        assert!(text.ends_with("To iMac"));
     }
 
     #[test]
@@ -683,6 +729,7 @@ fn saved_transfers() -> Vec<(ConnId, entanglo_core::features::file_transfer::Fil
         (ConnId::MAX, entanglo_core::features::file_transfer::FileProgress {
             transfer_id: format!("saved:{name}"), name, received: size, total: size,
             destination: Some(path), error: None, complete: true, updated_at: modified,
+            direction: TransferDirection::Incoming,
         })
     }).collect()
 }

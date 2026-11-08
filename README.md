@@ -9,7 +9,7 @@ Entanglo 0.1.58/0.1.59.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.10_amd64.deb
+sudo apt install ./entanglo-linux_0.1.11_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
@@ -23,13 +23,14 @@ select this Linux device. Use an X11 desktop for Mac absolute pointer input.
 - Mouse, keyboard and plain-text clipboard reception from trusted peers.
 - Streaming file reception into `Downloads/Entanglo`, with progress, collision
   handling, partial-file cleanup and completion acknowledgements.
+- File sending to trusted devices from **Files**, by file picker or drag and drop.
 - One row per device, with capability icons and clear authorization state.
 - A live Dashboard with actual TCP RTT, interface, heartbeat and recent files.
 - Stable device identity, persisted trust, port 55555 and Bonjour reconnect
   announcements when a controller has not returned after an update.
 - Standard minimize/maximize/close controls, Ctrl+Q and the original rabbit icon.
 - Notification sounds for trusted device connection and disconnection, file
-  errors and received files.
+  errors, and sent and received files.
 - Automatic hourly update checks. **News & Updates** downloads and verifies
   releases before installing. Personal installs update in the user account;
   system installs use the standard administrator authentication dialog.
@@ -37,7 +38,7 @@ select this Linux device. Use an X11 desktop for Mac absolute pointer input.
 Receiving is the default. To control other devices from this computer, enable
 **Share my keyboard & mouse** in **Input Sharing** and restart the app; assign
 devices to any screen edge there (X11 only).
-File sending, printing and Wayland input reception are not yet implemented.
+Printing and Wayland input reception are not yet implemented.
 
 ## Build and test
 
