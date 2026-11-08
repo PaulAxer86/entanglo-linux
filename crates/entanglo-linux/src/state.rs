@@ -641,6 +641,7 @@ fn transfer_row(progress: &entanglo_core::features::file_transfer::FileProgress,
     let tooltip = match (&progress.error, &progress.destination) {
         (Some(error), _) => Some(error.clone()),
         (None, Some(path)) => Some(format!("Saved to {}", path.display())),
+        (None, None) if progress.unconfirmed => Some("The device did not confirm receipt".to_owned()),
         (None, None) => None,
     };
     line.set_tooltip_text(tooltip.as_deref());
@@ -715,7 +716,7 @@ mod transfer_meta_tests {
     fn progress(total: u64) -> FileProgress {
         FileProgress { transfer_id: "id".into(), name: "a.png".into(), received: total, total,
             destination: None, error: None, complete: false, updated_at: std::time::UNIX_EPOCH,
-            direction: TransferDirection::Incoming }
+            direction: TransferDirection::Incoming, unconfirmed: false }
     }
 
     #[test]
@@ -808,7 +809,7 @@ fn saved_transfers() -> Vec<(ConnId, entanglo_core::features::file_transfer::Fil
         (ConnId::MAX, entanglo_core::features::file_transfer::FileProgress {
             transfer_id: format!("saved:{name}"), name, received: size, total: size,
             destination: Some(path), error: None, complete: true, updated_at: modified,
-            direction: TransferDirection::Incoming,
+            direction: TransferDirection::Incoming, unconfirmed: false,
         })
     }).collect()
 }

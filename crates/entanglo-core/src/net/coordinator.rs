@@ -49,8 +49,10 @@ pub enum RemoteEntryEdge {
     Bottom,
 }
 
-/// The receiver flushes the whole file to disk before acknowledging it.
-const FILE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a sent file waits for its confirmation. Mac receivers can lose
+/// theirs, so silence on a live connection does not mean the file failed.
+const FILE_ACK_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 500 } else { 15_000 });
 /// Pause between chunks, matching the Mac and Windows senders.
 const FILE_CHUNK_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 const FILE_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -705,6 +707,7 @@ impl Coordinator {
             complete: false,
             updated_at: std::time::SystemTime::now(),
             direction: TransferDirection::Outgoing,
+            unconfirmed: false,
         };
         self.report_outgoing(conn_id, &progress);
         match self.stream_file(conn_id, path, &mut progress).await {
@@ -763,9 +766,15 @@ impl Coordinator {
             }
             tokio::time::sleep(FILE_CHUNK_PAUSE).await;
         }
-        let ack = tokio::time::timeout(FILE_ACK_TIMEOUT, ack_rx).await
-            .map_err(|_| anyhow::anyhow!("The device did not confirm the file"))?;
-        file_ack_outcome(ack)
+        match tokio::time::timeout(FILE_ACK_WAIT, ack_rx).await {
+            Ok(ack) => file_ack_outcome(ack),
+            Err(_) => {
+                anyhow::ensure!(self.peers.lock().await.contains_key(&conn_id), CONNECTION_LOST);
+                tracing::info!(name = %progress.name, "device did not confirm the file");
+                progress.unconfirmed = true;
+                Ok(())
+            }
+        }
     }
 
     fn report_outgoing(&self, conn_id: ConnId, progress: &FileProgress) {
@@ -1280,6 +1289,53 @@ mod tests {
         assert!(progress.complete && progress.error.is_none());
         assert_eq!(progress.direction, TransferDirection::Outgoing);
         assert_eq!(progress.received, 1_200_000);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Feeds every chunk to the socket stand-in without ever acknowledging.
+    fn accept_chunks_without_ack(mut outgoing: mpsc::UnboundedReceiver<OutgoingMessage>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(message) = outgoing.recv().await {
+                if let OutgoingMessage::FileChunk { written, .. } = message {
+                    let _ = written.send(());
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn silence_on_a_live_connection_counts_as_sent_but_unconfirmed() {
+        let (coordinator, mut events, outgoing) = coordinator_with_fake_peer().await;
+        let directory = temporary_directory();
+        let source = directory.join("source.bin");
+        std::fs::write(&source, vec![1; 1_200_000]).unwrap();
+        let session = accept_chunks_without_ack(outgoing);
+
+        coordinator.send_files(42, vec![source]);
+        let progress = final_file_progress(&mut events).await;
+
+        assert!(progress.complete && progress.unconfirmed);
+        assert_eq!(progress.error, None);
+        session.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn silence_after_the_device_left_is_a_failure() {
+        let (coordinator, mut events, outgoing) = coordinator_with_fake_peer().await;
+        let directory = temporary_directory();
+        let source = directory.join("source.bin");
+        std::fs::write(&source, vec![1; 1_200_000]).unwrap();
+        let session = accept_chunks_without_ack(outgoing);
+
+        coordinator.send_files(42, vec![source]);
+        // Every chunk is out well before the confirmation wait ends.
+        tokio::time::sleep(FILE_ACK_WAIT / 2).await;
+        coordinator.peers.lock().await.remove(&42);
+        let progress = final_file_progress(&mut events).await;
+
+        assert_eq!(progress.error.as_deref(), Some(CONNECTION_LOST));
+        session.abort();
         std::fs::remove_dir_all(directory).unwrap();
     }
 

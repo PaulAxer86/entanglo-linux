@@ -32,6 +32,8 @@ pub struct FileProgress {
     pub complete: bool,
     pub updated_at: std::time::SystemTime,
     pub direction: TransferDirection,
+    /// All data was sent, but the receiver never confirmed it.
+    pub unconfirmed: bool,
 }
 
 struct IncomingTransfer {
@@ -81,6 +83,7 @@ impl FileTransferService {
             total: offer.size_bytes, destination: None, error: None, complete: false,
             updated_at: std::time::SystemTime::now(),
             direction: TransferDirection::Incoming,
+            unconfirmed: false,
         };
         self.incoming.insert(offer.transfer_id.clone(), IncomingTransfer { offer, file, temporary, received: 0, next_sequence: 0 });
         Ok(progress)
@@ -106,6 +109,7 @@ impl FileTransferService {
             destination: None, error: None, complete,
             updated_at: std::time::SystemTime::now(),
             direction: TransferDirection::Incoming,
+            unconfirmed: false,
         };
         if complete {
             anyhow::ensure!(transfer.received == transfer.offer.size_bytes, "Incomplete file");
