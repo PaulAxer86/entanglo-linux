@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use crate::protocol::payloads::{FileChunkPayload, FileOfferPayload};
 
+/// Largest accepted chunk. Windows peers send 2 MiB chunks, which still fit
+/// the 4 MiB frame limit once base64-encoded inside the message envelope.
+const MAX_CHUNK_BYTES: u32 = 2 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct FileProgress {
     pub transfer_id: String,
@@ -52,7 +56,7 @@ impl FileTransferService {
         anyhow::ensure!(!offer.name.is_empty() && offer.name != "." && offer.name != ".."
             && !offer.name.contains(['/', '\\']) && !offer.name.chars().any(char::is_control)
             && offer.name.len() <= 240, "Invalid file name");
-        anyhow::ensure!(offer.chunk_size > 0 && offer.chunk_size <= 1024 * 1024, "Unsupported chunk size");
+        anyhow::ensure!(offer.chunk_size > 0 && offer.chunk_size <= MAX_CHUNK_BYTES, "Unsupported chunk size");
         let chunks = offer.size_bytes / u64::from(offer.chunk_size)
             + u64::from(offer.size_bytes % u64::from(offer.chunk_size) != 0);
         anyhow::ensure!(u64::from(offer.total_chunks) == chunks.max(1), "Invalid chunk count");
@@ -148,6 +152,20 @@ mod tests {
         service.begin_incoming(offer("safe",3)).unwrap();
         assert!(service.apply_chunk(&chunk(0,b"ab")).is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(),0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn accepts_windows_chunk_size_and_rejects_larger_chunks() {
+        let dir=directory();let mut service=FileTransferService::in_directory(dir.clone());
+        let size=MAX_CHUNK_BYTES as usize;
+        let windows=FileOfferPayload { transfer_id:"test".into(), name:"photo.jpg".into(),
+            size_bytes:size as u64, total_chunks:1, chunk_size:MAX_CHUNK_BYTES, kind:None };
+        service.begin_incoming(windows.clone()).unwrap();
+        let done=service.apply_chunk(&chunk(0,&vec![7u8;size])).unwrap();
+        assert!(done.complete);
+        assert_eq!(std::fs::metadata(done.destination.unwrap()).unwrap().len(),size as u64);
+        let too_large=FileOfferPayload { chunk_size:MAX_CHUNK_BYTES+1, ..windows };
+        assert!(service.begin_incoming(too_large).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

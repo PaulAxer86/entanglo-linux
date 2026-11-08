@@ -341,6 +341,7 @@ pub async fn run_session(
                                 }
                                 Err(error) => {
                                     let reason = error.to_string();
+                                    tracing::warn!(name = %offer.name, chunk_size = offer.chunk_size, %reason, "incoming file offer rejected");
                                     if trusted {
                                         let _ = events_tx.send(SessionEvent::FileTransfer(FileProgress {
                                             transfer_id: offer.transfer_id.clone(), name: offer.name,

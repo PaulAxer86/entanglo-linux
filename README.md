@@ -8,7 +8,7 @@ Tested on Debian 13 amd64 with X11 and macOS Entanglo 0.1.58/0.1.59.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.1_amd64.deb
+sudo apt install ./entanglo-linux_0.1.2_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
