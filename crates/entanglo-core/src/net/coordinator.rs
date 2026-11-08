@@ -1062,6 +1062,17 @@ mod tests {
         assert_eq!(peer_screen_size(&current), Some((3008.0, 1692.0)));
     }
 
+    #[test]
+    fn linux_receivers_get_coordinates_on_their_fixed_canvas() {
+        let mut cursor = RemoteCursorState::new(7, RemoteEntryEdge::Left, 1920.0, 1080.0)
+            .with_linux_canvas(true);
+        let mut event = sample_delta_event(1919.0, 539.5);
+
+        assert!(!cursor.observe(&mut event));
+        assert_eq!(event.x, Some(2559.0));
+        assert_eq!(event.y, Some(1439.0));
+    }
+
     #[tokio::test]
     async fn edge_control_uses_the_peer_advertised_screen_size() {
         let (coordinator, _events) =
