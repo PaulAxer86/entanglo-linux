@@ -1,7 +1,7 @@
 //! One module per sidebar section, matching the Mac Dashboard's page
 //! set (`entanglo-macos/Entanglo/Views/`) and the Windows `Pages/`
 //! folder in `entanglo-windows/SKELETON.md`. Dashboard/Devices/
-//! Pairing/Input Sharing/Settings/Network/Logs are wired to live state via
+//! Input Sharing/Settings/Network/Logs are wired to live state via
 //! `state::AppShared` and `entanglo_core::net::Coordinator`; the rest
 //! are still placeholder `gtk::Widget`s — replace as Phase 1/2 work
 //! lands, per `ROADMAP.md`.
@@ -17,7 +17,6 @@ pub mod layout;
 pub mod logs;
 pub mod network;
 pub mod news_updates;
-pub mod pairing;
 pub mod print;
 pub mod settings;
 
@@ -36,10 +35,6 @@ pub const ALL_PAGES: &[PageInfo] = &[
     PageInfo {
         id: "devices",
         title: "Devices",
-    },
-    PageInfo {
-        id: "pairing",
-        title: "Pairing",
     },
     PageInfo {
         id: "input-sharing",
@@ -74,13 +69,12 @@ pub const ALL_PAGES: &[PageInfo] = &[
 /// Builds every page's widget once, up front. `window.rs` keeps this
 /// map alive for the app's lifetime and just swaps which widget is
 /// shown on sidebar selection — building fresh widgets per click
-/// (the earlier design) would lose Devices/Pairing state, and miss
+/// (the earlier design) would lose Devices state, and miss
 /// live updates, whenever the user wasn't looking at that page.
 pub fn build_all(shared: &Rc<AppShared>) -> HashMap<&'static str, gtk::Widget> {
     HashMap::from([
         ("dashboard", dashboard::build(shared)),
         ("devices", devices::build(shared)),
-        ("pairing", pairing::build(shared)),
         ("input-sharing", input_sharing::build(shared)),
         ("files", files::build(shared)),
         ("print", print::build()),

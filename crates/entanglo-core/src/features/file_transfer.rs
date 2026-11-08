@@ -20,6 +20,7 @@ pub struct FileProgress {
     pub destination: Option<PathBuf>,
     pub error: Option<String>,
     pub complete: bool,
+    pub updated_at: std::time::SystemTime,
 }
 
 struct IncomingTransfer {
@@ -69,6 +70,7 @@ impl FileTransferService {
         let progress = FileProgress {
             transfer_id: offer.transfer_id.clone(), name: offer.name.clone(), received: 0,
             total: offer.size_bytes, destination: None, error: None, complete: false,
+            updated_at: std::time::SystemTime::now(),
         };
         self.incoming.insert(offer.transfer_id.clone(), IncomingTransfer { offer, file, temporary, received: 0, next_sequence: 0 });
         Ok(progress)
@@ -92,6 +94,7 @@ impl FileTransferService {
             transfer_id: transfer.offer.transfer_id.clone(), name: transfer.offer.name.clone(),
             received: transfer.received, total: transfer.offer.size_bytes,
             destination: None, error: None, complete,
+            updated_at: std::time::SystemTime::now(),
         };
         if complete {
             anyhow::ensure!(transfer.received == transfer.offer.size_bytes, "Incomplete file");

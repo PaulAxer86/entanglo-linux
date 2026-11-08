@@ -347,6 +347,7 @@ pub async fn run_session(
                                             transfer_id: offer.transfer_id.clone(), name: offer.name,
                                             received: 0, total: offer.size_bytes, destination: None,
                                             complete: false, error: Some(reason.clone()),
+                                            updated_at: std::time::SystemTime::now(),
                                         }));
                                     }
                                     let ack = FileAckPayload { transfer_id: offer.transfer_id, ok: false, failure_reason: Some(reason) };
@@ -379,6 +380,7 @@ pub async fn run_session(
                                             transfer_id: chunk.transfer_id.clone(), name: String::new(),
                                             received: 0, total: 0, destination: None,
                                             complete: false, error: Some(reason.clone()),
+                                            updated_at: std::time::SystemTime::now(),
                                         }));
                                     }
                                     let ack = FileAckPayload { transfer_id: chunk.transfer_id, ok: false, failure_reason: Some(reason) };

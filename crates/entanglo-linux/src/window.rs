@@ -86,7 +86,7 @@ pub fn build(
 
     // Drains the backend's merged CoordinatorEvent stream for as
     // long as the main context runs, updating `shared` (and, through
-    // it, the live-bound Devices/Pairing widgets) in place. See
+    // it, the live-bound Devices widgets) in place. See
     // `state::handle_event`.
     let shared_for_events = Rc::clone(&shared);
     glib::spawn_future_local(async move {

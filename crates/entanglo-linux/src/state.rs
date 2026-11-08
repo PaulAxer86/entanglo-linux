@@ -69,8 +69,8 @@ pub struct NetworkStatSnapshot {
 
 /// Owns the long-lived widgets that need to be updated in place as
 /// `CoordinatorEvent`s arrive, plus the data driving them. Pages
-/// embed `devices_list`/`pairing_list` directly (see
-/// `pages::devices`/`pages::pairing`) rather than each page rebuilding
+/// embed `devices_list` directly (see
+/// `pages::devices`) rather than each page rebuilding
 /// its own list on every sidebar click — that would lose state (and
 /// miss updates) while the user is looking at a different page.
 pub struct AppShared {
@@ -78,7 +78,6 @@ pub struct AppShared {
     pub clipboard: ClipboardBridge,
     sounds: SoundPlayer,
     pub devices_list: gtk::ListBox,
-    pub pairing_list: gtk::ListBox,
     pub files_list: gtk::ListBox,
     transfers: RefCell<Vec<(ConnId, entanglo_core::features::file_transfer::FileProgress)>>,
     devices: RefCell<HashMap<ConnId, DeviceRow>>,
@@ -98,7 +97,6 @@ impl AppShared {
             clipboard: ClipboardBridge::new(),
             sounds: SoundPlayer::default(),
             devices_list: gtk::ListBox::new(),
-            pairing_list: gtk::ListBox::new(),
             files_list: gtk::ListBox::new(),
             transfers: RefCell::new(saved_transfers()),
             devices: RefCell::new(HashMap::new()),
@@ -129,6 +127,18 @@ impl AppShared {
                 rtt_ms: stat.and_then(|s| s.0), online: stat.is_some_and(|s| s.1 != SuggestedMode::Offline),
             })
         }).collect()
+    }
+
+    /// One `(name, trusted)` entry per identified device.
+    pub fn connected_devices(&self) -> Vec<(String, bool)> {
+        let devices = self.devices.borrow();
+        device_groups(&devices).into_iter().filter(|group| devices[&group[0]].device_id.is_some()).map(|group| {
+            (devices[&group[0]].name.clone(), group.iter().any(|id| devices[id].trusted))
+        }).collect()
+    }
+
+    pub fn device_name(&self, conn_id: ConnId) -> Option<String> {
+        self.devices.borrow().get(&conn_id).map(|row| row.name.clone())
     }
 
     pub fn recent_transfers(&self) -> Vec<entanglo_core::features::file_transfer::FileProgress> {
@@ -222,7 +232,7 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
                 .pending_pairing
                 .borrow_mut()
                 .insert(conn_id, PendingPairing { request, respond });
-            redraw_pairing(shared);
+            redraw_devices(shared);
         }
         CoordinatorEvent::Trusted { conn_id, device_id } => {
             if let Some(row) = shared.devices.borrow_mut().get_mut(&conn_id) {
@@ -231,12 +241,11 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             }
             shared.pending_pairing.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
-            redraw_pairing(shared);
             shared.sounds.play(Cue::Connected);
         }
         CoordinatorEvent::PairingRejected { conn_id } => {
             shared.pending_pairing.borrow_mut().remove(&conn_id);
-            redraw_pairing(shared);
+            redraw_devices(shared);
         }
         CoordinatorEvent::PeerDisconnected { conn_id, .. } => {
             let was_trusted = shared.devices.borrow_mut().remove(&conn_id).is_some_and(|row| row.trusted);
@@ -244,11 +253,11 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             shared.network_stats.borrow_mut().remove(&conn_id);
             shared.edge_assignments.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
-            redraw_pairing(shared);
             let mut transfer_interrupted = false;
             for (owner, progress) in shared.transfers.borrow_mut().iter_mut() {
                 if *owner == conn_id && !progress.complete && progress.error.is_none() {
                     progress.error = Some("Connection closed before transfer completed".into());
+                    progress.updated_at = std::time::SystemTime::now();
                     transfer_interrupted = true;
                 }
             }
@@ -409,15 +418,29 @@ fn redraw_devices(shared: &Rc<AppShared>) {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.set_valign(gtk::Align::Center);
 
-        if row.device_id.is_some() && !trusted {
+        let pending_request = group.iter().copied()
+            .find(|id| shared.pending_pairing.borrow().contains_key(id));
+        if let Some(pending_id) = pending_request {
+            // The session waits for this answer, so a device with an open
+            // pairRequest is answered here rather than through manual trust.
+            let accept = gtk::Button::with_label("Accept");
+            let requester = shared.pending_pairing.borrow().get(&pending_id)
+                .map(|pending| pending.request.requester_device_name.clone()).unwrap_or_default();
+            accept.set_tooltip_text(Some(&format!("{requester} wants to pair with this device")));
+            let shared_accept = Rc::clone(shared);
+            accept.connect_clicked(move |_| respond_to_pairing(&shared_accept, pending_id, true));
+            actions.append(&accept);
+            let reject = gtk::Button::with_label("Reject");
+            let shared_reject = Rc::clone(shared);
+            reject.connect_clicked(move |_| respond_to_pairing(&shared_reject, pending_id, false));
+            actions.append(&reject);
+        } else if row.device_id.is_some() && !trusted {
             // Manual trust, matching how the real entanglo-macos
             // v0.1.58 actually works: reading its source shows it
             // never sends or handles pairRequest/pairResponse at all
             // (PairingState.swift: "the wire-side PIN ceremony lands
             // in 0.2") — each side just decides who to trust from its
-            // own local Devices list. A peer that *does* send us a
-            // pairRequest still shows up on the Pairing page as
-            // usual; this button is for the ones that never will.
+            // own local Devices list.
             let trust_button = gtk::Button::with_label("Trust");
             let handle = shared.backend.handle.clone();
             let coordinator = Arc::clone(&shared.backend.coordinator);
@@ -538,9 +561,7 @@ fn redraw_files(shared: &Rc<AppShared>) {
         let title = gtk::Label::new(Some(&progress.name));
         title.set_xalign(0.0); title.add_css_class("heading"); row.append(&title);
         let peer = shared.devices.borrow().get(conn_id).map(|p| p.name.clone()).unwrap_or_else(|| "Entanglo device".into());
-        let status = if let Some(error) = &progress.error { format!("From {peer} · Failed: {error}") }
-            else if let Some(path) = &progress.destination { format!("From {peer} · Saved to {}", path.display()) }
-            else { format!("From {peer} · Receiving: {} / {} bytes", progress.received, progress.total) };
+        let status = transfer_summary(progress, &peer, &format_timestamp(progress.updated_at));
         let detail = gtk::Label::new(Some(&status)); detail.set_xalign(0.0);
         detail.set_wrap(true); detail.set_selectable(true); detail.add_css_class("dim-label"); row.append(&detail);
         if !progress.complete && progress.error.is_none() {
@@ -548,61 +569,76 @@ fn redraw_files(shared: &Rc<AppShared>) {
             bar.set_fraction(if progress.total == 0 { 0.0 } else { progress.received as f64 / progress.total as f64 });
             row.append(&bar);
         }
-        shared.files_list.append(&row);
+        row.set_hexpand(true);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let direction = gtk::Image::from_icon_name("go-down-symbolic");
+        direction.set_tooltip_text(Some("Received"));
+        direction.set_valign(gtk::Align::Start);
+        direction.set_margin_top(14);
+        direction.set_margin_start(12);
+        line.append(&direction);
+        line.append(&row);
+        shared.files_list.append(&line);
+    }
+}
+
+fn format_timestamp(time: std::time::SystemTime) -> String {
+    time.duration_since(std::time::UNIX_EPOCH).ok()
+        .and_then(|elapsed| glib::DateTime::from_unix_local(elapsed.as_secs() as i64).ok())
+        .and_then(|local| local.format("%-d %b %Y, %H:%M").ok())
+        .map(|text| text.to_string())
+        .unwrap_or_default()
+}
+
+fn transfer_summary(progress: &entanglo_core::features::file_transfer::FileProgress, peer: &str, when: &str) -> String {
+    let size = glib::format_size(progress.total);
+    if let Some(error) = &progress.error {
+        // A rejected chunk with no earlier offer has no known size.
+        if progress.total == 0 { format!("Failed {when} · From {peer} · {error}") }
+        else { format!("Failed {when} · {size} · From {peer} · {error}") }
+    } else if let Some(path) = &progress.destination {
+        format!("Received {when} · {size} · From {peer} · Saved to {}", path.display())
+    } else {
+        format!("Receiving · {} of {size} · From {peer}", glib::format_size(progress.received))
+    }
+}
+
+#[cfg(test)]
+mod transfer_summary_tests {
+    use super::*;
+    use entanglo_core::features::file_transfer::FileProgress;
+
+    fn progress(total: u64) -> FileProgress {
+        FileProgress { transfer_id: "id".into(), name: "a.png".into(), received: total, total,
+            destination: None, error: None, complete: false, updated_at: std::time::UNIX_EPOCH }
+    }
+
+    #[test]
+    fn received_file_shows_time_size_and_peer() {
+        let mut item = progress(5_000_000);
+        item.destination = Some("/tmp/a.png".into());
+        item.complete = true;
+        let text = transfer_summary(&item, "iMac", "8 Nov 2026, 13:00");
+        assert!(text.starts_with("Received 8 Nov 2026, 13:00 · "));
+        assert!(text.contains(glib::format_size(5_000_000).as_str()));
+        assert!(text.contains("From iMac"));
+    }
+
+    #[test]
+    fn failure_without_known_size_omits_the_size() {
+        let mut item = progress(0);
+        item.error = Some("Rejected".into());
+        assert_eq!(transfer_summary(&item, "PC", "now"), "Failed now · From PC · Rejected");
     }
 }
 
 pub fn initialize_files(shared: &Rc<AppShared>) { redraw_files(shared); }
 
-fn redraw_pairing(shared: &Rc<AppShared>) {
-    clear(&shared.pairing_list);
-    let pending = shared.pending_pairing.borrow();
-    let conn_ids: Vec<ConnId> = pending.keys().copied().collect();
-    drop(pending);
-
-    for conn_id in conn_ids {
-        let requester_name = shared
-            .pending_pairing
-            .borrow()
-            .get(&conn_id)
-            .map(|p| p.request.requester_device_name.clone())
-            .unwrap_or_default();
-
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        row.set_margin_top(14);
-        row.set_margin_bottom(14);
-        row.set_margin_start(16);
-        row.set_margin_end(16);
-        let title = gtk::Label::new(Some(&format!("{requester_name} wants to pair")));
-        title.set_halign(gtk::Align::Start);
-        title.set_xalign(0.0);
-        title.set_wrap(true);
-        title.add_css_class("heading");
-        row.append(&title);
-        let accept = gtk::Button::with_label("Accept");
-        let reject = gtk::Button::with_label("Reject");
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.append(&accept);
-        actions.append(&reject);
-        row.append(&actions);
-        shared.pairing_list.append(&row);
-
-        let shared_accept = Rc::clone(shared);
-        accept.connect_clicked(move |_| {
-            respond_to_pairing(&shared_accept, conn_id, true);
-        });
-        let shared_reject = Rc::clone(shared);
-        reject.connect_clicked(move |_| {
-            respond_to_pairing(&shared_reject, conn_id, false);
-        });
-    }
-}
-
 fn respond_to_pairing(shared: &Rc<AppShared>, conn_id: ConnId, accept: bool) {
     if let Some(pending) = shared.pending_pairing.borrow_mut().remove(&conn_id) {
         let _ = pending.respond.send(accept);
     }
-    redraw_pairing(shared);
+    redraw_devices(shared);
 }
 
 #[cfg(test)]
@@ -646,11 +682,11 @@ fn saved_transfers() -> Vec<(ConnId, entanglo_core::features::file_transfer::Fil
         Some((metadata.modified().ok()?, entry.path(), metadata.len()))
     }).collect();
     entries.sort_by_key(|item| std::cmp::Reverse(item.0));
-    entries.into_iter().take(20).map(|(_, path, size)| {
+    entries.into_iter().take(20).map(|(modified, path, size)| {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         (ConnId::MAX, entanglo_core::features::file_transfer::FileProgress {
             transfer_id: format!("saved:{name}"), name, received: size, total: size,
-            destination: Some(path), error: None, complete: true,
+            destination: Some(path), error: None, complete: true, updated_at: modified,
         })
     }).collect()
 }
