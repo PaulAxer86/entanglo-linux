@@ -84,6 +84,8 @@ pub struct AppShared {
     pub devices_list: gtk::ListBox,
     pub files_list: gtk::ListBox,
     transfers: RefCell<Vec<(ConnId, entanglo_core::features::file_transfer::FileProgress)>>,
+    /// Keeps a transfer's device name after that device disconnects.
+    transfer_peers: RefCell<HashMap<ConnId, String>>,
     devices: RefCell<HashMap<ConnId, DeviceRow>>,
     discovered: RefCell<HashMap<String, entanglo_core::net::DiscoveredPeer>>,
     pending_pairing: RefCell<HashMap<ConnId, PendingPairing>>,
@@ -102,6 +104,7 @@ impl AppShared {
             devices_list: gtk::ListBox::new(),
             files_list: gtk::ListBox::new(),
             transfers: RefCell::new(saved_transfers()),
+            transfer_peers: RefCell::default(),
             devices: RefCell::new(HashMap::new()),
             discovered: RefCell::new(HashMap::new()),
             pending_pairing: RefCell::new(HashMap::new()),
@@ -339,6 +342,9 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             stat.local_sequence += 1;
         }
         CoordinatorEvent::FileTransfer { conn_id, mut progress } => {
+            if let Some(name) = shared.device_name(conn_id) {
+                shared.transfer_peers.borrow_mut().insert(conn_id, name);
+            }
             if progress.error.is_some() {
                 shared.sounds.play(Cue::Error);
             } else if progress.complete {
@@ -580,32 +586,65 @@ fn redraw_files(shared: &Rc<AppShared>) {
         shared.files_list.append(&empty);
     }
     for (conn_id, progress) in transfers.iter() {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        row.set_margin_top(12); row.set_margin_bottom(12);
-        row.set_margin_start(12); row.set_margin_end(12);
-        let title = gtk::Label::new(Some(&progress.name));
-        title.set_xalign(0.0); title.add_css_class("heading"); row.append(&title);
-        let peer = shared.devices.borrow().get(conn_id).map(|p| p.name.clone()).unwrap_or_else(|| "Entanglo device".into());
-        let status = transfer_summary(progress, &peer, &format_timestamp(progress.updated_at));
-        let detail = gtk::Label::new(Some(&status)); detail.set_xalign(0.0);
-        detail.set_wrap(true); detail.set_selectable(true); detail.add_css_class("dim-label"); row.append(&detail);
-        if !progress.complete && progress.error.is_none() {
-            let bar = gtk::ProgressBar::new();
-            bar.set_fraction(if progress.total == 0 { 0.0 } else { progress.received as f64 / progress.total as f64 });
-            row.append(&bar);
-        }
-        row.set_hexpand(true);
-        let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        let outgoing = progress.direction == TransferDirection::Outgoing;
-        let direction = gtk::Image::from_icon_name(if outgoing { "go-up-symbolic" } else { "go-down-symbolic" });
-        direction.set_tooltip_text(Some(if outgoing { "Sent" } else { "Received" }));
-        direction.set_valign(gtk::Align::Start);
-        direction.set_margin_top(14);
-        direction.set_margin_start(12);
-        line.append(&direction);
-        line.append(&row);
-        shared.files_list.append(&line);
+        let peers = shared.transfer_peers.borrow();
+        let peer = peers.get(conn_id).map(String::as_str);
+        shared.files_list.append(&transfer_row(progress, peer));
     }
+}
+
+fn transfer_row(progress: &entanglo_core::features::file_transfer::FileProgress, peer: Option<&str>) -> gtk::Box {
+    let state = TransferState::of(progress);
+    let tone = state.tone();
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    line.set_margin_top(6);
+    line.set_margin_bottom(6);
+    line.set_margin_start(8);
+    line.set_margin_end(8);
+
+    let badge = gtk::Label::new(Some(if progress.direction == TransferDirection::Outgoing { "\u{2191}" } else { "\u{2193}" }));
+    badge.add_css_class("file-badge");
+    badge.add_css_class(tone);
+    badge.set_valign(gtk::Align::Center);
+    line.append(&badge);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    text.set_hexpand(true);
+    text.set_valign(gtk::Align::Center);
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let name = gtk::Label::new(Some(&progress.name));
+    name.add_css_class("file-name");
+    name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    name.set_xalign(0.0);
+    head.append(&name);
+    let status = gtk::Label::new(Some(state.label()));
+    status.add_css_class("file-status");
+    status.add_css_class(tone);
+    head.append(&status);
+    text.append(&head);
+
+    let meta_text = transfer_meta(progress, peer, &format_timestamp(progress.updated_at));
+    let meta = gtk::Label::new(Some(&meta_text));
+    meta.add_css_class("file-meta");
+    meta.add_css_class("dim-label");
+    meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    meta.set_xalign(0.0);
+    text.append(&meta);
+
+    if matches!(state, TransferState::Receiving | TransferState::Sending) {
+        let bar = gtk::ProgressBar::new();
+        bar.set_margin_top(4);
+        bar.set_fraction(if progress.total == 0 { 0.0 } else { progress.received as f64 / progress.total as f64 });
+        text.append(&bar);
+    }
+    line.append(&text);
+
+    let tooltip = match (&progress.error, &progress.destination) {
+        (Some(error), _) => Some(error.clone()),
+        (None, Some(path)) => Some(format!("Saved to {}", path.display())),
+        (None, None) => None,
+    };
+    line.set_tooltip_text(tooltip.as_deref());
+    line
 }
 
 fn format_timestamp(time: std::time::SystemTime) -> String {
@@ -616,26 +655,60 @@ fn format_timestamp(time: std::time::SystemTime) -> String {
         .unwrap_or_default()
 }
 
-fn transfer_summary(progress: &entanglo_core::features::file_transfer::FileProgress, peer: &str, when: &str) -> String {
-    let size = glib::format_size(progress.total);
-    let outgoing = progress.direction == TransferDirection::Outgoing;
-    let party = if outgoing { format!("To {peer}") } else { format!("From {peer}") };
-    if let Some(error) = &progress.error {
-        // A rejected chunk with no earlier offer has no known size.
-        if progress.total == 0 { format!("Failed {when} · {party} · {error}") }
-        else { format!("Failed {when} · {size} · {party} · {error}") }
-    } else if outgoing {
-        if progress.complete { format!("Sent {when} · {size} · {party}") }
-        else { format!("Sending · {} of {size} · {party}", glib::format_size(progress.received)) }
-    } else if let Some(path) = &progress.destination {
-        format!("Received {when} · {size} · From {peer} · Saved to {}", path.display())
-    } else {
-        format!("Receiving · {} of {size} · From {peer}", glib::format_size(progress.received))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferState { Receiving, Received, Sending, Sent, Failed }
+
+impl TransferState {
+    fn of(progress: &entanglo_core::features::file_transfer::FileProgress) -> Self {
+        let outgoing = progress.direction == TransferDirection::Outgoing;
+        if progress.error.is_some() { Self::Failed }
+        else if outgoing { if progress.complete { Self::Sent } else { Self::Sending } }
+        else if progress.complete || progress.destination.is_some() { Self::Received }
+        else { Self::Receiving }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Receiving => "Receiving",
+            Self::Received => "Received",
+            Self::Sending => "Sending",
+            Self::Sent => "Sent",
+            Self::Failed => "Failed",
+        }
+    }
+
+    /// The CSS colour class shared by the row's badge and status.
+    fn tone(self) -> &'static str {
+        match self {
+            Self::Receiving | Self::Received => "received",
+            Self::Sending | Self::Sent => "sent",
+            Self::Failed => "failed",
+        }
     }
 }
 
+/// The smaller line under a file name: size, date and the other device.
+fn transfer_meta(progress: &entanglo_core::features::file_transfer::FileProgress, peer: Option<&str>, when: &str) -> String {
+    let size = glib::format_size(progress.total).to_string();
+    let party = peer.map(|name| {
+        if progress.direction == TransferDirection::Outgoing { format!("To {name}") } else { format!("From {name}") }
+    });
+    let state = TransferState::of(progress);
+    let mut parts = Vec::new();
+    if matches!(state, TransferState::Receiving | TransferState::Sending) {
+        parts.push(format!("{} of {size}", glib::format_size(progress.received)));
+    } else {
+        // A rejected chunk with no earlier offer has no known size.
+        if progress.total > 0 { parts.push(size); }
+        parts.push(when.to_owned());
+    }
+    parts.extend(party);
+    parts.extend(progress.error.clone());
+    parts.join(" \u{b7} ")
+}
+
 #[cfg(test)]
-mod transfer_summary_tests {
+mod transfer_meta_tests {
     use super::*;
     use entanglo_core::features::file_transfer::FileProgress;
 
@@ -646,14 +719,13 @@ mod transfer_summary_tests {
     }
 
     #[test]
-    fn received_file_shows_time_size_and_peer() {
+    fn received_file_shows_size_date_and_sender() {
         let mut item = progress(5_000_000);
         item.destination = Some("/tmp/a.png".into());
         item.complete = true;
-        let text = transfer_summary(&item, "iMac", "8 Nov 2026, 13:00");
-        assert!(text.starts_with("Received 8 Nov 2026, 13:00 · "));
-        assert!(text.contains(glib::format_size(5_000_000).as_str()));
-        assert!(text.contains("From iMac"));
+        assert_eq!(TransferState::of(&item), TransferState::Received);
+        let size = glib::format_size(5_000_000);
+        assert_eq!(transfer_meta(&item, Some("iMac"), "8 Nov 2026, 13:00"), format!("{size} \u{b7} 8 Nov 2026, 13:00 \u{b7} From iMac"));
     }
 
     #[test]
@@ -661,16 +733,23 @@ mod transfer_summary_tests {
         let mut item = progress(5_000_000);
         item.direction = TransferDirection::Outgoing;
         item.complete = true;
-        let text = transfer_summary(&item, "iMac", "8 Nov 2026, 13:00");
-        assert!(text.starts_with("Sent 8 Nov 2026, 13:00 · "));
-        assert!(text.ends_with("To iMac"));
+        assert_eq!(TransferState::of(&item), TransferState::Sent);
+        assert!(transfer_meta(&item, Some("iMac"), "now").ends_with("To iMac"));
+    }
+
+    #[test]
+    fn file_restored_from_disk_has_no_device_to_name() {
+        let mut item = progress(1_000);
+        item.complete = true;
+        assert!(!transfer_meta(&item, None, "now").contains("From"));
     }
 
     #[test]
     fn failure_without_known_size_omits_the_size() {
         let mut item = progress(0);
         item.error = Some("Rejected".into());
-        assert_eq!(transfer_summary(&item, "PC", "now"), "Failed now · From PC · Rejected");
+        assert_eq!(TransferState::of(&item), TransferState::Failed);
+        assert_eq!(transfer_meta(&item, Some("PC"), "now"), "now \u{b7} From PC \u{b7} Rejected");
     }
 }
 

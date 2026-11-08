@@ -12,6 +12,33 @@ use crate::edge::EdgeTarget;
 use crate::state::AppShared;
 
 const TARGET_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const DROP_HINT: &str = "or choose them from this computer";
+const NO_DEVICE_HINT: &str = "Connect a trusted device to send files";
+const STYLE: &str = "
+.send-card { padding: 14px 16px; }
+.send-zone {
+    padding: 14px 16px;
+    border: 1px dashed alpha(currentColor, 0.28);
+    border-radius: 12px;
+    background-color: alpha(@accent_color, 0.05);
+    transition: background-color 120ms ease-out, border-color 120ms ease-out;
+}
+.send-zone:drop(active) {
+    border: 1px solid @accent_color;
+    background-color: alpha(@accent_color, 0.16);
+}
+.file-badge { min-width: 26px; min-height: 26px; border-radius: 13px; font-weight: 700; }
+.file-badge.large { min-width: 38px; min-height: 38px; border-radius: 19px; font-size: 1.25em; }
+.file-badge.received { color: @success_color; background-color: alpha(@success_color, 0.15); }
+.file-badge.sent { color: @accent_color; background-color: alpha(@accent_color, 0.15); }
+.file-badge.failed { color: @error_color; background-color: alpha(@error_color, 0.15); }
+.file-name { font-weight: 600; }
+.file-status { font-size: 0.82em; font-weight: 600; }
+.file-status.received { color: @success_color; }
+.file-status.sent { color: @accent_color; }
+.file-status.failed { color: @error_color; }
+.file-meta { font-size: 0.85em; }
+";
 
 /// The device picker and the devices its rows stand for.
 #[derive(Clone)]
@@ -30,7 +57,7 @@ impl SendTarget {
     }
 
     /// Rebuilds the picker only when devices change, keeping the selected one.
-    fn refresh(&self, zone: &gtk::Box, choose: &gtk::Button) {
+    fn refresh(&self, zone: &gtk::Box, hint: &Label) {
         let current = self.shared.file_targets();
         if *self.targets.borrow() != current {
             let previous = self.targets.borrow().get(self.dropdown.selected() as usize).map(|target| target.device_id.clone());
@@ -45,11 +72,19 @@ impl SendTarget {
         let available = !self.targets.borrow().is_empty();
         self.dropdown.set_sensitive(available);
         zone.set_sensitive(available);
-        choose.set_sensitive(available);
+        hint.set_text(if available { DROP_HINT } else { NO_DEVICE_HINT });
     }
 }
 
+fn install_style() {
+    let Some(display) = gtk::gdk::Display::default() else { return };
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(STYLE);
+    gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
 pub fn build(shared: &Rc<AppShared>) -> Widget {
+    install_style();
     let column = gtk::Box::new(Orientation::Vertical, 12);
     column.append(&send_card(shared));
 
@@ -76,16 +111,14 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
 }
 
 fn send_card(shared: &Rc<AppShared>) -> gtk::Box {
-    let card = gtk::Box::new(Orientation::Vertical, 10);
+    let card = gtk::Box::new(Orientation::Vertical, 12);
     card.add_css_class("card");
+    card.add_css_class("send-card");
     card.set_margin_top(4);
     card.set_margin_start(4);
     card.set_margin_end(4);
 
     let recipient = gtk::Box::new(Orientation::Horizontal, 12);
-    recipient.set_margin_top(14);
-    recipient.set_margin_start(16);
-    recipient.set_margin_end(16);
     let heading = Label::new(Some("Send a file to"));
     heading.add_css_class("heading");
     heading.set_hexpand(true);
@@ -96,29 +129,41 @@ fn send_card(shared: &Rc<AppShared>) -> gtk::Box {
     recipient.append(&dropdown);
     card.append(&recipient);
 
-    let zone = gtk::Box::new(Orientation::Vertical, 6);
-    zone.add_css_class("view");
-    zone.set_margin_start(16);
-    zone.set_margin_end(16);
-    let zone_label = Label::new(Some("Drop files here"));
-    zone_label.add_css_class("dim-label");
-    zone_label.set_margin_top(26);
-    zone_label.set_margin_bottom(26);
-    zone.append(&zone_label);
-    card.append(&zone);
+    let zone = gtk::Box::new(Orientation::Horizontal, 14);
+    zone.add_css_class("send-zone");
+    let badge = Label::new(Some("\u{2191}"));
+    badge.add_css_class("file-badge");
+    badge.add_css_class("large");
+    badge.add_css_class("sent");
+    badge.set_valign(Align::Center);
+    zone.append(&badge);
 
-    let choose = gtk::Button::with_label("Choose files…");
-    choose.set_halign(Align::End);
-    choose.set_margin_bottom(14);
-    choose.set_margin_end(16);
-    card.append(&choose);
+    let zone_text = gtk::Box::new(Orientation::Vertical, 2);
+    zone_text.set_hexpand(true);
+    zone_text.set_valign(Align::Center);
+    let zone_title = Label::new(Some("Drop files here"));
+    zone_title.add_css_class("heading");
+    zone_title.set_halign(Align::Start);
+    zone_text.append(&zone_title);
+    let hint = Label::new(Some(DROP_HINT));
+    hint.add_css_class("caption");
+    hint.add_css_class("dim-label");
+    hint.set_halign(Align::Start);
+    zone_text.append(&hint);
+    zone.append(&zone_text);
+
+    let choose = gtk::Button::with_label("Choose files\u{2026}");
+    choose.add_css_class("suggested-action");
+    choose.set_valign(Align::Center);
+    zone.append(&choose);
+    card.append(&zone);
 
     let target = SendTarget {
         shared: Rc::clone(shared),
         dropdown,
         targets: Rc::default(),
     };
-    target.refresh(&zone, &choose);
+    target.refresh(&zone, &hint);
 
     let drop_target = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
     let target_drop = target.clone();
@@ -134,42 +179,44 @@ fn send_card(shared: &Rc<AppShared>) -> gtk::Box {
     zone.add_controller(drop_target);
 
     let target_choose = target.clone();
-    // A native dialog disappears unless something keeps a reference to it.
-    let open_dialog: Rc<RefCell<Option<gtk::FileChooserNative>>> = Rc::default();
-    choose.connect_clicked(move |button| {
-        let parent = button.root().and_downcast::<gtk::Window>();
-        let dialog = gtk::FileChooserNative::new(
-            Some("Choose files to send"),
-            parent.as_ref(),
-            gtk::FileChooserAction::Open,
-            Some("Send"),
-            Some("Cancel"),
-        );
-        dialog.set_select_multiple(true);
-        let target = target_choose.clone();
-        let held = Rc::clone(&open_dialog);
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                let files = dialog.files();
-                let paths: Vec<PathBuf> = (0..files.n_items())
-                    .filter_map(|index| files.item(index).and_downcast::<gtk::gio::File>())
-                    .filter_map(|file| file.path())
-                    .collect();
-                if !paths.is_empty() {
-                    target.send(paths);
-                }
-            }
-            held.borrow_mut().take();
-        });
-        dialog.show();
-        *open_dialog.borrow_mut() = Some(dialog);
-    });
+    choose.connect_clicked(move |button| choose_files(button, target_choose.clone()));
 
     let zone_poll = zone.clone();
-    let choose_poll = choose.clone();
     glib::source::timeout_add_local(TARGET_REFRESH_INTERVAL, move || {
-        target.refresh(&zone_poll, &choose_poll);
+        target.refresh(&zone_poll, &hint);
         glib::ControlFlow::Continue
     });
     card
+}
+
+/// Uses GTK's own dialog: the desktop portal refuses requests from a process
+/// that gained the `input` group through `sg`, and then shows nothing.
+fn choose_files(button: &gtk::Button, target: SendTarget) {
+    let parent = button.root().and_downcast::<gtk::Window>();
+    let dialog = gtk::FileChooserDialog::new(
+        Some("Choose files to send"),
+        parent.as_ref(),
+        gtk::FileChooserAction::Open,
+        &[("Cancel", gtk::ResponseType::Cancel), ("Send", gtk::ResponseType::Accept)],
+    );
+    dialog.set_modal(true);
+    dialog.set_select_multiple(true);
+    dialog.set_default_size(860, 560);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    // GTK otherwise opens on its recent files, which are empty on many desktops.
+    let _ = dialog.set_current_folder(Some(&gtk::gio::File::for_path(glib::home_dir())));
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            let files = dialog.files();
+            let paths: Vec<PathBuf> = (0..files.n_items())
+                .filter_map(|index| files.item(index).and_downcast::<gtk::gio::File>())
+                .filter_map(|file| file.path())
+                .collect();
+            if !paths.is_empty() {
+                target.send(paths);
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.present();
 }

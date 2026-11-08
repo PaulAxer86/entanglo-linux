@@ -9,7 +9,7 @@ Entanglo 0.1.58/0.1.59.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.11_amd64.deb
+sudo apt install ./entanglo-linux_0.1.12_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
