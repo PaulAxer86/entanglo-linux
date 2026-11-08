@@ -1,8 +1,8 @@
 # Entanglo for Linux
 
-Native GTK4/libadwaita receiver for Entanglo peers on the same LAN.
-Runs on Debian 12 and 13 amd64 with X11. Tested live on Debian 13 with macOS
-Entanglo 0.1.58/0.1.59.
+Native GTK4/libadwaita app that shares mouse, keyboard, clipboard and files
+with Entanglo peers on the same LAN. Runs on Debian 12 and 13 amd64 with X11.
+Tested live on Debian 13 with macOS Entanglo 0.1.60.
 
 ## Download and install
 
@@ -70,7 +70,8 @@ the tray, or press Ctrl+Q, to stop input, withdraw the network advertisement and
 quit. Without a tray, closing the window quits. **Settings** can start Entanglo
 at login.
 
-Protocol details: [PROTOCOL.md](PROTOCOL.md). Development history:
-[docs/DEV.md](docs/DEV.md). No keystroke content is logged.
+Protocol details: [PROTOCOL.md](PROTOCOL.md). Current status and next steps:
+[HANDOVER.md](HANDOVER.md). Development history: [docs/DEV.md](docs/DEV.md).
+No keystroke content is logged.
 
 Copyright Paolo Asara. See Cargo workspace metadata for licensing.

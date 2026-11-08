@@ -340,6 +340,12 @@ Three-message flow:
    { "transferId": "...", "ok": true, "failureReason": null }
    ```
 
+Send `fileAck` on the connection that delivered the chunks. `senderDeviceId`
+is not always the key a peer uses for its own connections: macOS keys outbound
+connections by Bonjour service name and can lose the ack this way (Mac 0.1.60).
+Entanglo for Linux therefore waits 15 seconds for the ack, then reports a file
+sent over a connection that is still alive as sent but unconfirmed.
+
 The receiver writes the assembled file to `~/Downloads` by default
 (`$XDG_DOWNLOAD_DIR` if set, else `~/Downloads`, matching the XDG user
 dirs spec). For `kind: "printJob"` it spools to the printer instead.

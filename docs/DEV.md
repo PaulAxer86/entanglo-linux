@@ -2,6 +2,9 @@
 
 ## Handover status (read this first)
 
+Current status and next steps are in [`HANDOVER.md`](../HANDOVER.md). The
+entries below are history and describe the code as it was on their date.
+
 ### 2026-11-08 — portable Linux 0.1.1 release and publication
 
 All fixes are included in the versioned application/package, not a host patch.
@@ -400,10 +403,9 @@ widgets bound to `state::AppShared`, updated from real
 ✅/🚧/⬜ status per item in `ROADMAP.md`'s Phase 1 deliverables list:
 
 - **This section is stale as of the first pass — updated 2026-09-01,
-  see below.** Files, Print, and News & Updates remain placeholder
-  pages (deliberately, per `ROADMAP.md` — real Phase 2 protocol/backend
-  work, not just UI). Input Sharing, Network, Logs, and Settings are
-  now real, live-data pages, not placeholders.
+  see below.** Print remains a placeholder page (deliberately, per
+  `ROADMAP.md`). Files, News & Updates, Input Sharing, Network, Logs, and
+  Settings are real, live-data pages.
 - Edge-detection + pointer grab/hide now exist for real
   (`crates/entanglo-linux/src/edge.rs`, X11 only — see `ROADMAP.md`'s
   Wayland risk note) and are reachable both via true edge-push and the
@@ -413,10 +415,7 @@ widgets bound to `state::AppShared`, updated from real
   fully.
 - `features/network_quality.rs`, `logging.rs`, and the plain-text
   clipboard path are real, not stubs, and back live UI/protocol flows.
-  `file_transfer`, `screenshot`, and `url_push` are still Phase 2 stubs.
-- No CI workflow yet — add one so `cargo check --workspace` and
-  `cargo test --workspace` run on every push (needs a runner image
-  with `libgtk-4-dev`/`libadwaita-1-dev`, not just Rust).
+  `screenshot` and `url_push` are still Phase 2 stubs.
 - Pairing page Accept/Reject buttons are wired but unexercised in this
   pass — no *incoming* pairRequest happened to arrive live (only
   outgoing ones, to Android and the Mac). Worth a deliberate test:

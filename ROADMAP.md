@@ -334,8 +334,9 @@ evdev/uinput path really is display-server-agnostic as designed.
 
 - ✅ **Clipboard sync** (plain text via GTK/GDK, no extra `arboard`
   dependency; opt-in, trust-gated, echo-suppressed, 1 MiB UTF-8 cap).
-- **File drop** (offer/chunk/ack). Files land in `$XDG_DOWNLOAD_DIR`
-  (fallback `~/Downloads`).
+- 🚧 **File drop** (offer/chunk/ack), both directions. Files land in
+  `$XDG_DOWNLOAD_DIR` (fallback `~/Downloads`). Large outgoing files still
+  stall; see `HANDOVER.md`.
 - **URL push** (`xdg-open` with a scheme allow-list, spawned via
   `std::process::Command` — never via a shell string).
 - **Screenshot peer** (`ashpd` → portal `Screenshot` request, scale
@@ -348,16 +349,16 @@ evdev/uinput path really is display-server-agnostic as designed.
   ported straight from the algorithm description in
   `entanglo-macos/docs/ARCHITECTURE.md`.
 - **Recent Transfers** tile + log.
-- **News & Updates** page (parse
+- ✅ **News & Updates** page (parse
   `https://entanglo.pages.dev/updates/latest-linux.json` — new
   manifest, mirroring the existing `latest.json`/`latest-win.json`
   pattern in the website repo).
-- **Auto-update** integration: app polls the manifest above and
+- ✅ **Auto-update** integration: app polls the manifest above and
   downloads the next `entanglo_X.Y.Z_amd64.deb` from GitHub Releases.
   Verify SHA-256 from the manifest, then install via
   `pkexec dpkg -i <path>` so the user gets exactly one polkit prompt
   (no silent root escalation).
-- **Tray icon** via `ksni` (`StatusNotifierItem`), with a documented
+- ✅ **Tray icon** via `ksni` (`StatusNotifierItem`), with a documented
   fallback ("pin the window" tip) for GNOME Shell installs without
   the AppIndicator extension.
 
