@@ -1,4 +1,4 @@
-Entanglo for Debian 13 amd64 / X11
+Entanglo for Debian 12 and 13 amd64 / X11
 
 Run ./install-entanglo.sh as your desktop user. Open Entanglo from the menu.
 Alternatively: sudo apt install ./entanglo-linux_VERSION_amd64.deb

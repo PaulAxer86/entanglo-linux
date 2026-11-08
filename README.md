@@ -1,14 +1,15 @@
 # Entanglo for Linux
 
 Native GTK4/libadwaita receiver for Entanglo peers on the same LAN.
-Tested on Debian 13 amd64 with X11 and macOS Entanglo 0.1.58/0.1.59.
+Runs on Debian 12 and 13 amd64 with X11. Tested live on Debian 13 with macOS
+Entanglo 0.1.58/0.1.59.
 
 ## Download and install
 
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.7_amd64.deb
+sudo apt install ./entanglo-linux_0.1.8_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
@@ -41,14 +42,16 @@ File sending, printing and Wayland input reception are not yet implemented.
 ## Build and test
 
 ```sh
-sudo apt install cargo rustc build-essential pkg-config libgtk-4-dev libadwaita-1-dev libudev-dev
+sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev libudev-dev
+# Rust 1.85 or newer: `apt install cargo rustc` on Debian 13, rustup on Debian 12
 cargo test --locked --workspace -- --test-threads=1
 cargo build --locked -p entanglo-linux
 python3 scripts/package-debian.py
 ```
 
-The project targets Debian 13's Rust 1.85 and GTK 4.18. Packages are built on
-Debian 13 to avoid introducing a newer glibc requirement. Run
+The project needs Rust 1.85 and supports GTK 4.8 with libadwaita 1.2 or newer.
+Release packages are built on Debian 12 so one package runs on Debian 12 and 13;
+a package built on Debian 13 only runs on Debian 13. Run
 `scripts/setup-debian.sh` for a development install.
 
 ## Releases and automatic publishing

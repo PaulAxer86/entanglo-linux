@@ -32,7 +32,7 @@ manifest = {
     'title': 'Linux input and file receiver with automatic reconnect and verified updates',
     'url': f'https://github.com/{repository}/releases/download/v{version}/{package.name}',
     'sha256': hashlib.sha256(package.read_bytes()).hexdigest(), 'size': package.stat().st_size,
-    'minimumSystemVersion': 'Debian 13', 'architecture': 'amd64',
+    'minimumSystemVersion': 'Debian 12', 'architecture': 'amd64',
     'sourceCommit': os.environ['RELEASE_SHA'],
     'highlights': ['Automatic reconnect with stable device identity and port 55555.',
                    'Mouse, keyboard and streaming file reception from trusted Entanglo peers.',
@@ -43,7 +43,7 @@ manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 release = api('POST', f'{base}/releases', json.dumps({
     'tag_name': f'v{version}', 'target_commitish': os.environ['RELEASE_SHA'],
     'name': f'Entanglo Linux {version}', 'draft': True,
-    'body': '\n'.join('- ' + item for item in manifest['highlights']) + '\n\nDebian 13 amd64, X11. Install the .deb, add your user to the input group, and trust your controller.',
+    'body': '\n'.join('- ' + item for item in manifest['highlights']) + '\n\nDebian 12 and 13 amd64, X11. Install the .deb, add your user to the input group, and trust your controller.',
 }).encode())
 for path in [package, manifest_path, root / 'dist/INSTALL.txt']:
     url = release['upload_url'].split('{')[0] + '?name=' + path.name

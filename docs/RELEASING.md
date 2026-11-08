@@ -2,7 +2,7 @@
 
 1. Fix and test the Linux app. Bump `workspace.package.version` in Cargo.toml.
 2. Push the source to `PaulAxer86/entanglo-linux` main.
-3. Linux CI builds and tests on Debian 13, creates the `.deb`, and publishes
+3. Linux CI builds and tests on Debian 12, creates the `.deb`, and publishes
    a versioned GitHub release with `latest-linux.json`. Existing versions
    are never overwritten: bump the version for every release.
 4. The website's Linux sync workflow checks for a new release every 15 minutes,

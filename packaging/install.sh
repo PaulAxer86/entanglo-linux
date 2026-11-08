@@ -10,8 +10,8 @@ if [[ "$(dpkg --print-architecture)" != amd64 ]]; then
     exit 1
 fi
 . /etc/os-release
-if [[ "$ID" != debian || "$VERSION_ID" != 13 ]]; then
-    echo 'This installer targets Debian 13.' >&2
+if [[ "$ID" != debian || ( "$VERSION_ID" != 12 && "$VERSION_ID" != 13 ) ]]; then
+    echo 'This installer targets Debian 12 and 13.' >&2
     exit 1
 fi
 sha256sum --check SHA256SUMS

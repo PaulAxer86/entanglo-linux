@@ -29,7 +29,7 @@ struct EdgeRow {
 }
 
 struct StatusWidgets {
-    share: adw::SwitchRow,
+    share: gtk::Switch,
     restart_row: adw::ActionRow,
     receiver: Label,
     active_target_row: adw::ActionRow,
@@ -49,13 +49,18 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
     let column = gtk::Box::new(Orientation::Vertical, 24);
 
     let sharing = section("Sharing");
-    let share = adw::SwitchRow::builder()
+    let share_row = adw::ActionRow::builder()
         .title("Share my keyboard & mouse")
         .subtitle("Control other trusted devices from this computer")
         .use_markup(false)
-        .active(startup::controller_mode_requested())
         .build();
-    sharing.add(&share);
+    let share = gtk::Switch::builder()
+        .active(startup::controller_mode_requested())
+        .valign(gtk::Align::Center)
+        .build();
+    share_row.add_suffix(&share);
+    share_row.set_activatable_widget(Some(&share));
+    sharing.add(&share_row);
     let restart_row = plain_row("Restart Entanglo to apply this change");
     let restart_button = gtk::Button::with_label("Restart");
     restart_button.set_valign(gtk::Align::Center);

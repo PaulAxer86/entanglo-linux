@@ -1,11 +1,10 @@
-//! `AdwNavigationSplitView` app shell — sidebar + content, the GTK4
-//! analogue of the macOS `NavigationSplitView` Entanglo uses today.
-//! See `STACK.md` for the fidelity rationale.
+//! App shell: a sidebar beside a stack of pages. Built from widgets available
+//! in Debian 12's libadwaita 1.2, the oldest toolkit this app supports.
 
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, NavigationPage, NavigationSplitView};
+use adw::{Application, ApplicationWindow};
 use entanglo_core::net::CoordinatorEvent;
 use gtk::{Align, Label, ListBox, ListBoxRow, Orientation};
 
@@ -62,15 +61,16 @@ pub fn build(
     version_label.add_css_class("dim-label");
     sidebar_box.append(&version_label);
 
-    let sidebar = NavigationPage::builder()
-        .title("Entanglo")
-        .child(&sidebar_box)
-        .build();
-
-    let content = NavigationPage::builder()
-        .title(crate::pages::ALL_PAGES[0].title)
-        .child(pages.get("dashboard").expect("dashboard page always built"))
-        .build();
+    let content = gtk::Stack::new();
+    content.set_hexpand(true);
+    content.set_hhomogeneous(false);
+    content.set_vhomogeneous(false);
+    for page in crate::pages::ALL_PAGES {
+        if let Some(widget) = pages.get(page.id) {
+            content.add_named(widget, Some(page.id));
+        }
+    }
+    content.set_visible_child_name(crate::pages::ALL_PAGES[0].id);
 
     let content_for_selection = content.clone();
     sidebar_list.connect_row_selected(move |_, row| {
@@ -78,10 +78,7 @@ pub fn build(
         let Some(page) = crate::pages::ALL_PAGES.get(row.index() as usize) else {
             return;
         };
-        content_for_selection.set_title(page.title);
-        if let Some(widget) = pages.get(page.id) {
-            content_for_selection.set_child(Some(widget));
-        }
+        content_for_selection.set_visible_child_name(page.id);
     });
 
     // Drains the backend's merged CoordinatorEvent stream for as
@@ -95,10 +92,11 @@ pub fn build(
         }
     });
 
-    let split_view = NavigationSplitView::builder()
-        .sidebar(&sidebar)
-        .content(&content)
-        .build();
+    let panes = gtk::Box::new(Orientation::Horizontal, 0);
+    panes.set_vexpand(true);
+    panes.append(&sidebar_box);
+    panes.append(&gtk::Separator::new(Orientation::Vertical));
+    panes.append(&content);
 
     let header = adw::HeaderBar::builder()
         .decoration_layout(":minimize,maximize,close")
@@ -108,9 +106,9 @@ pub fn build(
     let logo = gtk::Image::from_icon_name("com.paoloasara.Entanglo");
     logo.set_pixel_size(24);
     header.pack_start(&logo);
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&split_view));
+    let shell = gtk::Box::new(Orientation::Vertical, 0);
+    shell.append(&header);
+    shell.append(&panes);
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -118,7 +116,7 @@ pub fn build(
         .icon_name("com.paoloasara.Entanglo")
         .default_width(1120)
         .default_height(860)
-        .content(&toolbar)
+        .content(&shell)
         .build();
     let app_weak = app.downgrade();
     window.connect_close_request(move |window| {

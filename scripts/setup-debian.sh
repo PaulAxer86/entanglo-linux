@@ -7,6 +7,10 @@ if (( EUID == 0 )); then
 fi
 sudo apt-get update
 sudo apt-get install -y cargo rustc build-essential pkg-config libgtk-4-dev libadwaita-1-dev libudev-dev avahi-daemon avahi-utils
+if ! dpkg --compare-versions "$(rustc --version | cut -d' ' -f2)" ge 1.85; then
+    echo 'Entanglo needs Rust 1.85 or newer. On Debian 12, install it with rustup and run this script again.' >&2
+    exit 1
+fi
 sudo install -m 0644 "$repo_dir/packaging/60-entanglo-uinput.rules" /etc/udev/rules.d/60-entanglo-uinput.rules
 sudo install -m 0644 "$repo_dir/packaging/entanglo-uinput.conf" /etc/modules-load.d/entanglo-uinput.conf
 sudo modprobe uinput

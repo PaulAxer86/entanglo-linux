@@ -12,7 +12,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: debian:13
+    # Built on the oldest supported Debian so the package also runs on newer ones.
+    container: debian:12
     permissions:
       contents: write
     env:
@@ -24,7 +25,13 @@ jobs:
       - name: Install Debian build dependencies
         run: |
           apt-get update
-          apt-get install -y git ca-certificates curl cargo rustc build-essential pkg-config python3 libgtk-4-dev libadwaita-1-dev libudev-dev xdg-user-dirs
+          apt-get install -y git ca-certificates curl build-essential pkg-config python3 libgtk-4-dev libadwaita-1-dev libudev-dev xdg-user-dirs
+      - name: Install Rust 1.85
+        run: |
+          curl -fsSL https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init -o /tmp/rustup-init
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain 1.85.1 --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
       - name: Test
         run: cargo test --locked --workspace -- --test-threads=1

@@ -42,10 +42,10 @@ pub const MAC_TO_LINUX: &[(u16, u16)] = &[
     (19, 3),  // 2 -> KEY_2
     (20, 4),  // 3 -> KEY_3
     (21, 5),  // 4 -> KEY_4
-    (22, 6),  // 6 -> KEY_6
-    (23, 8),  // 5 -> KEY_5 (Mac's odd ordering, verified against HIToolbox)
+    (22, 7),  // 6 -> KEY_6
+    (23, 6),  // 5 -> KEY_5 (Mac's codes for 5 and 6 are out of order)
     (25, 10), // 9 -> KEY_9
-    (26, 7),  // 7 -> KEY_7
+    (26, 8),  // 7 -> KEY_7
     (28, 9),  // 8 -> KEY_8
     (29, 11), // 0 -> KEY_0
     // Punctuation
@@ -144,6 +144,17 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(before, codes.len(), "duplicate Linux KEY_* code in table");
+    }
+
+    #[test]
+    fn digit_row_maps_each_mac_key_to_the_same_digit() {
+        // Mac key codes for 1234567890, then Linux KEY_1 to KEY_9 and KEY_0.
+        let mac = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
+        let linux = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        for (mac_code, linux_code) in mac.into_iter().zip(linux) {
+            assert_eq!(mac_to_linux(mac_code), Some(linux_code));
+            assert_eq!(linux_to_mac(linux_code), Some(mac_code));
+        }
     }
 
     #[test]

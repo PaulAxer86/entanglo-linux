@@ -8,6 +8,19 @@ import subprocess
 import tarfile
 import tempfile
 
+def shared_library_depends(executable):
+    """Derive library dependencies from what the built binary actually links."""
+    with tempfile.TemporaryDirectory(prefix='entanglo-shlibs-') as folder:
+        debian = Path(folder) / 'debian'
+        debian.mkdir()
+        (debian / 'control').write_text('Source: entanglo-linux\n\nPackage: entanglo-linux\nArchitecture: amd64\n')
+        result = subprocess.run(['dpkg-shlibdeps', '-O', '--warnings=0', str(executable)],
+                                cwd=folder, check=True, capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        if line.startswith('shlibs:Depends='):
+            return line.split('=', 1)[1]
+    raise SystemExit('dpkg-shlibdeps reported no library dependencies')
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--version')
 parser.add_argument('--binary', type=Path)
@@ -40,7 +53,7 @@ Architecture: amd64
 Maintainer: Paolo Asara <paolo.asara86@gmail.com>
 Section: net
 Priority: optional
-Depends: libc6 (>= 2.38), libgcc-s1, libgtk-4-1 (>= 4.10), libadwaita-1-0 (>= 1.4), libglib2.0-0t64, libudev1, udev, kmod, passwd, login, xdg-utils, curl, ca-certificates, avahi-daemon, avahi-utils
+Depends: {shared_library_depends(stage / 'usr/bin/entanglo-linux')}, udev, kmod, passwd, login, xdg-utils, curl, ca-certificates, avahi-daemon, avahi-utils
 Recommends: sound-theme-freedesktop, pipewire-bin | pulseaudio-utils
 Description: Entanglo LAN mouse, keyboard and file reception
  Receive input and files from trusted Entanglo devices on your LAN.
