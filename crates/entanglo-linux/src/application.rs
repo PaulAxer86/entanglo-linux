@@ -30,6 +30,10 @@ pub fn configure(
             return;
         }
         let window = crate::window::build(app, backend.clone(), events_rx.clone());
-        window.present();
+        let start_hidden = crate::startup::take_start_hidden();
+        if !start_hidden {
+            window.present();
+        }
+        crate::tray::start(app, &window, &backend.handle, start_hidden);
     });
 }

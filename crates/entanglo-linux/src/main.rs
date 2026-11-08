@@ -6,6 +6,7 @@ mod pages;
 mod sound;
 mod state;
 mod startup;
+mod tray;
 mod window;
 
 use adw::prelude::*;

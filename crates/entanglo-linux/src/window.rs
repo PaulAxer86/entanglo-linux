@@ -121,7 +121,11 @@ pub fn build(
         .content(&toolbar)
         .build();
     let app_weak = app.downgrade();
-    window.connect_close_request(move |_| {
+    window.connect_close_request(move |window| {
+        if crate::tray::is_active() {
+            window.set_visible(false);
+            return glib::Propagation::Stop;
+        }
         if let Some(app) = app_weak.upgrade() {
             app.quit();
         }

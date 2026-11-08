@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use entanglo_core::net::trust_store;
 
 const CONTROLLER_SETTING: &str = "controller_mode";
+const START_HIDDEN_VARIABLE: &str = "ENTANGLO_START_HIDDEN";
 
 /// Whether the user asked to share this computer's keyboard and mouse.
 pub fn controller_mode_requested() -> bool {
@@ -24,6 +25,57 @@ pub fn save_controller_mode(enabled: bool) -> std::io::Result<()> {
     } else {
         trust_store::remove_setting(CONTROLLER_SETTING)
     }
+}
+
+/// Whether this launch came from the login entry. Cleared so that a later
+/// in-app restart, which inherits the environment, opens its window normally.
+pub fn take_start_hidden() -> bool {
+    let hidden = std::env::var_os(START_HIDDEN_VARIABLE).is_some();
+    std::env::remove_var(START_HIDDEN_VARIABLE);
+    hidden
+}
+
+fn autostart_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"))
+        .join("autostart/com.paoloasara.Entanglo.desktop")
+}
+
+pub fn autostart_enabled() -> bool {
+    autostart_path().exists()
+}
+
+pub fn set_autostart(enabled: bool) -> std::io::Result<()> {
+    let path = autostart_path();
+    if !enabled {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let executable = std::env::current_exe()?;
+    // A running binary replaced by an update reports this suffix.
+    let executable = executable.to_string_lossy().replace(" (deleted)", "");
+    std::fs::write(path, autostart_entry(&executable))
+}
+
+fn autostart_entry(executable: &str) -> String {
+    let quoted = executable
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$")
+        .replace('%', "%%");
+    format!(
+        "[Desktop Entry]\nType=Application\nName=Entanglo\n\
+         Comment=Share mouse, keyboard and clipboard on the LAN\n\
+         Exec=env {START_HIDDEN_VARIABLE}=1 \"{quoted}\"\n\
+         Icon=com.paoloasara.Entanglo\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+    )
 }
 
 /// Launches `executable` once this process has exited, so the replacement can
@@ -88,7 +140,13 @@ pub fn prepare_logs() {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote;
+    use super::{autostart_entry, shell_quote};
+    #[test]
+    fn autostart_entry_starts_hidden_and_escapes_the_path() {
+        let entry = autostart_entry("/opt/my $app%/entanglo");
+        assert!(entry.starts_with("[Desktop Entry]\n"));
+        assert!(entry.contains("Exec=env ENTANGLO_START_HIDDEN=1 \"/opt/my \\$app%%/entanglo\"\n"));
+    }
     #[test]
     fn executable_paths_and_arguments_are_shell_quoted() {
         assert_eq!(shell_quote("/tmp/my app"), "'/tmp/my app'");

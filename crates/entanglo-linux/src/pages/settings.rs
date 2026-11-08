@@ -75,6 +75,28 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
 
     container.append(&gtk::Separator::new(Orientation::Horizontal));
 
+    let startup_heading = Label::new(Some("Startup"));
+    startup_heading.set_halign(gtk::Align::Start);
+    startup_heading.add_css_class("heading");
+    container.append(&startup_heading);
+
+    let autostart_toggle = gtk::CheckButton::with_label("Start Entanglo at login");
+    autostart_toggle.set_active(crate::startup::autostart_enabled());
+    autostart_toggle.connect_toggled(|toggle| {
+        if let Err(error) = crate::startup::set_autostart(toggle.is_active()) {
+            tracing::warn!(%error, "could not update the login entry");
+        }
+    });
+    container.append(&autostart_toggle);
+
+    let autostart_note = Label::new(Some("Starts in the system tray, without opening the window."));
+    autostart_note.set_halign(gtk::Align::Start);
+    autostart_note.set_wrap(true);
+    autostart_note.add_css_class("dim-label");
+    container.append(&autostart_note);
+
+    container.append(&gtk::Separator::new(Orientation::Horizontal));
+
     let clipboard_heading = Label::new(Some("Clipboard"));
     clipboard_heading.set_halign(gtk::Align::Start);
     clipboard_heading.add_css_class("heading");

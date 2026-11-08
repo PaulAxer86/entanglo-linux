@@ -8,7 +8,7 @@ Tested on Debian 13 amd64 with X11 and macOS Entanglo 0.1.58/0.1.59.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.6_amd64.deb
+sudo apt install ./entanglo-linux_0.1.7_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
@@ -60,8 +60,11 @@ website commit and deployment. See [docs/RELEASING.md](docs/RELEASING.md).
 
 Logs are saved for both desktop and terminal launches in
 `~/.local/state/entanglo/last.log`. The **Reconnect** Dashboard action refreshes
-Bonjour without changing device identity. Closing the window stops input,
-withdraws the network advertisement and quits.
+Bonjour without changing device identity. On desktops with a system tray,
+closing the window keeps Entanglo running there; choose **Quit Entanglo** from
+the tray, or press Ctrl+Q, to stop input, withdraw the network advertisement and
+quit. Without a tray, closing the window quits. **Settings** can start Entanglo
+at login.
 
 Protocol details: [PROTOCOL.md](PROTOCOL.md). Development history:
 [docs/DEV.md](docs/DEV.md). No keystroke content is logged.

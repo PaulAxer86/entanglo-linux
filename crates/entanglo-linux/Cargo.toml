@@ -23,6 +23,7 @@ async-channel = "2"
 uuid = { version = "1", features = ["v4"] }
 x11rb = "0.13"
 libc = "0.2"
+ksni = "0.3"
 
 [package.metadata.deb]
 maintainer = "Paolo Asara <paolo.asara86@gmail.com>"

@@ -18,7 +18,9 @@ Install update verifies the downloaded package and restarts the application.
 Personal installs update without administrator privileges. System installs
 use the standard administrator approval prompt.
 
-Closing the window or Ctrl+Q quits. Minimizing keeps sharing active.
+Closing the window keeps Entanglo running in the system tray, when the desktop
+has one. Use Quit Entanglo from the tray, or Ctrl+Q, to quit. Without a tray,
+closing the window quits. Minimizing keeps sharing active.
 Logs: ~/.local/state/entanglo/last.log
 Source: https://github.com/PaulAxer86/entanglo-linux
 Downloads: https://entanglo.pages.dev/download
