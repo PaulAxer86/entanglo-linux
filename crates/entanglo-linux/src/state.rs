@@ -18,6 +18,7 @@ use entanglo_core::protocol::payloads::PairRequestPayload;
 use crate::app_state::Backend;
 use crate::clipboard::ClipboardBridge;
 use crate::edge::ScreenEdge;
+use crate::sound::{Cue, SoundPlayer};
 
 pub struct DeviceRow {
     pub direction: Direction,
@@ -75,6 +76,7 @@ pub struct NetworkStatSnapshot {
 pub struct AppShared {
     pub backend: Backend,
     pub clipboard: ClipboardBridge,
+    sounds: SoundPlayer,
     pub devices_list: gtk::ListBox,
     pub pairing_list: gtk::ListBox,
     pub files_list: gtk::ListBox,
@@ -94,6 +96,7 @@ impl AppShared {
         Self {
             backend,
             clipboard: ClipboardBridge::new(),
+            sounds: SoundPlayer::default(),
             devices_list: gtk::ListBox::new(),
             pairing_list: gtk::ListBox::new(),
             files_list: gtk::ListBox::new(),
@@ -229,24 +232,32 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             shared.pending_pairing.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
             redraw_pairing(shared);
+            shared.sounds.play(Cue::Connected);
         }
         CoordinatorEvent::PairingRejected { conn_id } => {
             shared.pending_pairing.borrow_mut().remove(&conn_id);
             redraw_pairing(shared);
         }
         CoordinatorEvent::PeerDisconnected { conn_id, .. } => {
-            shared.devices.borrow_mut().remove(&conn_id);
+            let was_trusted = shared.devices.borrow_mut().remove(&conn_id).is_some_and(|row| row.trusted);
             shared.pending_pairing.borrow_mut().remove(&conn_id);
             shared.network_stats.borrow_mut().remove(&conn_id);
             shared.edge_assignments.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
             redraw_pairing(shared);
+            let mut transfer_interrupted = false;
             for (owner, progress) in shared.transfers.borrow_mut().iter_mut() {
                 if *owner == conn_id && !progress.complete && progress.error.is_none() {
                     progress.error = Some("Connection closed before transfer completed".into());
+                    transfer_interrupted = true;
                 }
             }
             redraw_files(shared);
+            if transfer_interrupted {
+                shared.sounds.play(Cue::Error);
+            } else if was_trusted {
+                shared.sounds.play(Cue::Disconnected);
+            }
         }
         CoordinatorEvent::Heartbeat { conn_id, rtt_ms } => {
             let device_name = shared
@@ -266,6 +277,11 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             stat.local_sequence += 1;
         }
         CoordinatorEvent::FileTransfer { conn_id, mut progress } => {
+            if progress.error.is_some() {
+                shared.sounds.play(Cue::Error);
+            } else if progress.complete {
+                shared.sounds.play(Cue::FileReceived);
+            }
             let mut transfers = shared.transfers.borrow_mut();
             if let Some((_, previous)) = transfers.iter_mut().find(|(owner, item)| *owner == conn_id && item.transfer_id == progress.transfer_id) {
                 if progress.name.is_empty() {

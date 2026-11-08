@@ -3,6 +3,7 @@ mod application;
 mod clipboard;
 mod edge;
 mod pages;
+mod sound;
 mod state;
 mod startup;
 mod window;

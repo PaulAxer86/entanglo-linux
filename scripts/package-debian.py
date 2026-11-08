@@ -41,6 +41,7 @@ Maintainer: Paolo Asara <paolo.asara86@gmail.com>
 Section: net
 Priority: optional
 Depends: libc6 (>= 2.38), libgcc-s1, libgtk-4-1 (>= 4.10), libadwaita-1-0 (>= 1.4), libglib2.0-0t64, libudev1, udev, kmod, passwd, login, xdg-utils, curl, ca-certificates, avahi-daemon, avahi-utils
+Recommends: sound-theme-freedesktop, pipewire-bin | pulseaudio-utils
 Description: Entanglo LAN mouse, keyboard and file reception
  Receive input and files from trusted Entanglo devices on your LAN.
  X11 input reception supports macOS 0.1.58 absolute pointer coordinates.

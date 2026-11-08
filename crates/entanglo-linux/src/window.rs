@@ -52,6 +52,15 @@ pub fn build(
     brand.append(&app_title);
     sidebar_box.append(&brand);
     sidebar_box.append(&sidebar_list);
+    let version_label = Label::new(Some(concat!("Version ", env!("CARGO_PKG_VERSION"))));
+    version_label.set_halign(Align::Start);
+    version_label.set_valign(Align::End);
+    version_label.set_vexpand(true);
+    version_label.set_margin_start(18);
+    version_label.set_margin_bottom(14);
+    version_label.add_css_class("caption");
+    version_label.add_css_class("dim-label");
+    sidebar_box.append(&version_label);
 
     let sidebar = NavigationPage::builder()
         .title("Entanglo")
