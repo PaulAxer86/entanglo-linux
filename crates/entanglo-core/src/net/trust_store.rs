@@ -361,3 +361,20 @@ pub fn save_preferred_controller(device_id: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(data_dir())?;
     std::fs::write(data_dir().join("preferred_controller"), device_id)
 }
+
+/// Small user preferences kept beside the device identity.
+pub fn read_setting(name: &str) -> Option<String> {
+    std::fs::read_to_string(data_dir().join(name)).ok()
+}
+
+pub fn write_setting(name: &str, value: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir())?;
+    std::fs::write(data_dir().join(name), value)
+}
+
+pub fn remove_setting(name: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(data_dir().join(name)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}

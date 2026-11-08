@@ -8,7 +8,7 @@ Tested on Debian 13 amd64 with X11 and macOS Entanglo 0.1.58/0.1.59.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.4_amd64.deb
+sudo apt install ./entanglo-linux_0.1.5_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
@@ -33,8 +33,9 @@ select this Linux device. Use an X11 desktop for Mac absolute pointer input.
   releases before installing. Personal installs update in the user account;
   system installs use the standard administrator authentication dialog.
 
-Receiving is the default. Local input capture is opt-in via
-`ENTANGLO_ENABLE_CONTROLLER=1`; Linux-to-Linux control needs separate testing.
+Receiving is the default. To control other devices from this computer, enable
+**Share my keyboard & mouse** in **Input Sharing** and restart the app; assign
+devices to the left or right screen edge there (X11 only).
 File sending, printing and Wayland input reception are not yet implemented.
 
 ## Build and test

@@ -49,10 +49,7 @@ fn install(manifest: UpdateManifest) -> Result<(), String> {
         if !status.success() { return Err("Installation was cancelled or failed".into()); }
     }
     // Wait for this instance to quit before registering the replacement.
-    std::process::Command::new("sh").args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "entanglo-restart", &std::process::id().to_string()])
-        .arg(&executable).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    crate::startup::spawn_replacement(&executable).map_err(|e| e.to_string())
 }
 
 pub fn build(shared: &Rc<AppShared>) -> Widget {

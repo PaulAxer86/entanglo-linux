@@ -12,13 +12,15 @@ use std::sync::Arc;
 use gtk::prelude::*;
 
 use entanglo_core::features::network_quality::{NetworkQualityMonitor, SuggestedMode};
-use entanglo_core::net::{ConnId, CoordinatorEvent, Direction};
+use entanglo_core::net::{trust_store, ConnId, CoordinatorEvent, Direction};
 use entanglo_core::protocol::payloads::PairRequestPayload;
 
 use crate::app_state::Backend;
 use crate::clipboard::ClipboardBridge;
-use crate::edge::ScreenEdge;
+use crate::edge::{EdgeAssignments, EdgeTarget, ScreenEdge};
 use crate::sound::{Cue, SoundPlayer};
+
+const EDGE_SETTING: &str = "edge_assignments";
 
 pub struct DeviceRow {
     pub direction: Direction,
@@ -84,10 +86,9 @@ pub struct AppShared {
     discovered: RefCell<HashMap<String, entanglo_core::net::DiscoveredPeer>>,
     pending_pairing: RefCell<HashMap<ConnId, PendingPairing>>,
     network_stats: RefCell<HashMap<ConnId, NetworkStat>>,
-    /// Which screen edge (if any) triggers `set_active_receiver` for
-    /// each trusted peer — set from the dropdown in `redraw_devices`,
-    /// read by `edge::start`'s poll loop. See `edge.rs`.
-    edge_assignments: RefCell<HashMap<ConnId, ScreenEdge>>,
+    /// Which device each screen edge hands control to — set on the Input
+    /// Sharing page, read by `edge::start`'s poll loop. See `edge.rs`.
+    edge_assignments: RefCell<EdgeAssignments>,
 }
 
 impl AppShared {
@@ -103,7 +104,9 @@ impl AppShared {
             discovered: RefCell::new(HashMap::new()),
             pending_pairing: RefCell::new(HashMap::new()),
             network_stats: RefCell::new(HashMap::new()),
-            edge_assignments: RefCell::new(HashMap::new()),
+            edge_assignments: RefCell::new(crate::edge::parse_assignments(
+                &trust_store::read_setting(EDGE_SETTING).unwrap_or_default(),
+            )),
         }
     }
 
@@ -148,11 +151,39 @@ impl AppShared {
     /// Looks up which trusted peer (if any) is assigned to `edge` —
     /// `edge::start`'s poll loop calls this on every crossing.
     pub fn conn_id_for_edge(&self, edge: ScreenEdge) -> Option<ConnId> {
-        self.edge_assignments
-            .borrow()
-            .iter()
-            .find(|(_, assigned)| **assigned == edge)
+        let assignments = self.edge_assignments.borrow();
+        let target = assignments.get(&edge)?;
+        self.devices.borrow().iter()
+            .filter(|(_, row)| row.trusted && row.device_id.as_deref() == Some(target.device_id.as_str()))
             .map(|(conn_id, _)| *conn_id)
+            .min()
+    }
+
+    pub fn edge_target(&self, edge: ScreenEdge) -> Option<EdgeTarget> {
+        self.edge_assignments.borrow().get(&edge).cloned()
+    }
+
+    pub fn set_edge_target(&self, edge: ScreenEdge, target: Option<EdgeTarget>) {
+        let mut assignments = self.edge_assignments.borrow_mut();
+        match target {
+            Some(target) => { assignments.insert(edge, target); }
+            None => { assignments.remove(&edge); }
+        }
+        if let Err(error) = trust_store::write_setting(EDGE_SETTING, &crate::edge::serialize_assignments(&assignments)) {
+            tracing::warn!(%error, "could not save edge assignments");
+        }
+    }
+
+    /// Trusted, connected devices that accept remote input.
+    pub fn control_targets(&self) -> Vec<EdgeTarget> {
+        let devices = self.devices.borrow();
+        device_groups(&devices).into_iter().filter_map(|group| {
+            let id = group.iter().find(|id| devices[id].trusted)?;
+            group.iter().any(|id| devices[id].roles.iter().any(|role| role == "receiver")).then(|| EdgeTarget {
+                device_id: devices[id].device_id.clone().unwrap_or_default(),
+                name: devices[id].name.clone(),
+            })
+        }).collect()
     }
 
     /// For the Network page's poll-based redraw — see
@@ -251,7 +282,6 @@ pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
             let was_trusted = shared.devices.borrow_mut().remove(&conn_id).is_some_and(|row| row.trusted);
             shared.pending_pairing.borrow_mut().remove(&conn_id);
             shared.network_stats.borrow_mut().remove(&conn_id);
-            shared.edge_assignments.borrow_mut().remove(&conn_id);
             redraw_devices(shared);
             let mut transfer_interrupted = false;
             for (owner, progress) in shared.transfers.borrow_mut().iter_mut() {
@@ -353,10 +383,8 @@ fn redraw_devices(shared: &Rc<AppShared>) {
     clear(&shared.devices_list);
     let devices = shared.devices.borrow();
     for group in device_groups(&devices) {
-        // Preserve any configured control connection; otherwise prefer a
-        // trusted connection. Device identity, not its name, defines a row.
-        let conn_id = *group.iter().find(|id| shared.edge_assignments.borrow().contains_key(id))
-            .or_else(|| group.iter().find(|id| devices[id].trusted))
+        // Prefer a trusted connection. Device identity, not its name, defines a row.
+        let conn_id = *group.iter().find(|id| devices[id].trusted)
             .unwrap_or(&group[0]);
         let row = &devices[&conn_id];
         let trusted = group.iter().any(|id| devices[id].trusted);
@@ -470,38 +498,6 @@ fn redraw_devices(shared: &Rc<AppShared>) {
             });
             actions.append(&control_button);
 
-            // Real edge-switching config: which screen edge (if any)
-            // hands control to this peer when the cursor is pushed
-            // into it — see edge.rs. X11-only; the dropdown still
-            // shows on Wayland (harmless), it just never fires
-            // because `edge::start` never got an X11 connection to
-            // poll from.
-            let options: Vec<&str> = std::iter::once("No edge")
-                .chain(ScreenEdge::ALL.iter().map(|e| e.label()))
-                .collect();
-            let model = gtk::StringList::new(&options);
-            let current_selection = shared
-                .edge_assignments
-                .borrow()
-                .get(&conn_id)
-                .and_then(|assigned| ScreenEdge::ALL.iter().position(|e| e == assigned))
-                .map(|index| (index + 1) as u32)
-                .unwrap_or(0);
-            let edge_dropdown = gtk::DropDown::builder()
-                .model(&model)
-                .selected(current_selection)
-                .build();
-            let shared_edge = Rc::clone(shared);
-            edge_dropdown.connect_selected_notify(move |dropdown| {
-                let selected = dropdown.selected();
-                let mut assignments = shared_edge.edge_assignments.borrow_mut();
-                if selected == 0 {
-                    assignments.remove(&conn_id);
-                } else {
-                    assignments.insert(conn_id, ScreenEdge::ALL[(selected - 1) as usize]);
-                }
-            });
-            actions.append(&edge_dropdown);
         }
 
         if actions.first_child().is_some() {

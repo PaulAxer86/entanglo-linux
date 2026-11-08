@@ -156,11 +156,13 @@ impl InputCaptureService {
                 let (delta_x, delta_y) = match axis {
                     evdev::RelativeAxisType::REL_X => {
                         self.pointer_x += event.value() as i64;
-                        (Some(delta), None)
+                        // evdev reports each axis separately. Always send both
+                        // so receivers that require a full delta still move.
+                        (Some(delta), Some(0.0))
                     }
                     evdev::RelativeAxisType::REL_Y => {
                         self.pointer_y += event.value() as i64;
-                        (None, Some(delta))
+                        (Some(0.0), Some(delta))
                     }
                     evdev::RelativeAxisType::REL_WHEEL => {
                         return Some(InputEventMessage {
@@ -307,6 +309,19 @@ mod tests {
                 .click_state,
             Some(2)
         );
+    }
+
+    #[test]
+    fn single_axis_motion_always_carries_a_full_delta() {
+        let mut capture = InputCaptureService::new();
+        let horizontal = capture
+            .translate(InputEvent::new(EventType::RELATIVE, evdev::RelativeAxisType::REL_X.0, 4))
+            .unwrap();
+        assert_eq!((horizontal.delta_x, horizontal.delta_y), (Some(4.0), Some(0.0)));
+        let vertical = capture
+            .translate(InputEvent::new(EventType::RELATIVE, evdev::RelativeAxisType::REL_Y.0, -3))
+            .unwrap();
+        assert_eq!((vertical.delta_x, vertical.delta_y), (Some(0.0), Some(-3.0)));
     }
 
     #[test]

@@ -118,7 +118,8 @@ impl InputInjectionService {
 
         match event.kind {
             InputEventKind::MouseMove => {
-                if let (Some(dx), Some(dy)) = (event.delta_x, event.delta_y) {
+                if event.delta_x.is_some() || event.delta_y.is_some() {
+                    let (dx, dy) = (event.delta_x.unwrap_or(0.0), event.delta_y.unwrap_or(0.0));
                     self.device.emit(&[
                         InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, dx as i32),
                         InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, dy as i32),

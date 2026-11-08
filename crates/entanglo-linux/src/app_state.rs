@@ -255,6 +255,30 @@ fn spawn_discovery(coordinator: Arc<Coordinator>, device_name: String, port: u16
         }
     };
 
+    // The single dial below covers first contact; this restores trusted
+    // devices after a dropped link, which neither side would otherwise retry.
+    let candidates = Arc::new(std::sync::Mutex::new(
+        std::collections::HashMap::<String, entanglo_core::net::DiscoveredPeer>::new(),
+    ));
+    {
+        let candidates = Arc::clone(&candidates);
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let peers: Vec<_> = candidates.lock().unwrap().values().cloned().collect();
+                for peer in peers {
+                    let attempt = coordinator.connect_discovered(&peer);
+                    if let Ok(Err(error)) = tokio::time::timeout(std::time::Duration::from_secs(3), attempt).await {
+                        tracing::debug!(%error, name = %peer.device_name, "trusted device reconnect failed");
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(async move {
         let mut peer_rx = peer_rx;
         // mDNS keeps re-announcing every advertised service (itself
@@ -266,8 +290,7 @@ fn spawn_discovery(coordinator: Arc<Coordinator>, device_name: String, port: u16
         // on every rediscovery, opening a fresh connection — and, for
         // a peer that isn't trusted yet, sending it a fresh
         // `pairRequest` — every time. One dial attempt per advertised
-        // service name for this process's lifetime is enough; a
-        // proper "retry a dropped peer" policy is future work.
+        // service name for this process's lifetime is enough.
         let mut already_dialed = std::collections::HashSet::new();
 
         loop {
@@ -283,6 +306,10 @@ fn spawn_discovery(coordinator: Arc<Coordinator>, device_name: String, port: u16
                 tracing::debug!("mDNS daemon stopped, discovery ended");
                 return;
             };
+            candidates.lock().unwrap().insert(
+                format!("{}|{}|{}", peer.device_name, peer.interface.as_deref().unwrap_or(""), peer.host),
+                peer.clone(),
+            );
             if !already_dialed.insert(peer.device_name.clone()) {
                 continue; // already dialing or connected to this service
             }

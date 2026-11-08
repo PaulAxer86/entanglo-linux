@@ -22,11 +22,12 @@
 //! with the same physical mouse. `grab_pointer` + an invisible cursor
 //! fixes that.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode};
+use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode, GrabStatus};
 use x11rb::rust_connection::RustConnection;
 
 use entanglo_core::net::{ConnId, RemoteEntryEdge};
@@ -48,6 +49,43 @@ impl ScreenEdge {
             ScreenEdge::Right => "Right edge",
         }
     }
+
+    fn setting_key(self) -> &'static str {
+        match self {
+            ScreenEdge::Left => "left",
+            ScreenEdge::Right => "right",
+        }
+    }
+}
+
+/// A device assigned to a screen edge. Keyed by device identity rather than
+/// by connection so the choice survives reconnects and restarts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeTarget {
+    pub device_id: String,
+    pub name: String,
+}
+
+pub type EdgeAssignments = HashMap<ScreenEdge, EdgeTarget>;
+
+/// One `edge<TAB>device id<TAB>device name` line per assignment.
+pub fn parse_assignments(text: &str) -> EdgeAssignments {
+    text.lines().filter_map(|line| {
+        let mut fields = line.splitn(3, '\t');
+        let key = fields.next()?;
+        let edge = ScreenEdge::ALL.into_iter().find(|edge| edge.setting_key() == key)?;
+        let device_id = fields.next()?.to_owned();
+        let name = fields.next()?.to_owned();
+        Some((edge, EdgeTarget { device_id, name }))
+    }).collect()
+}
+
+pub fn serialize_assignments(assignments: &EdgeAssignments) -> String {
+    ScreenEdge::ALL.into_iter().filter_map(|edge| {
+        let target = assignments.get(&edge)?;
+        let name = target.name.replace(['\t', '\n'], " ");
+        Some(format!("{}\t{}\t{name}\n", edge.setting_key(), target.device_id))
+    }).collect()
 }
 
 pub struct EdgeWatcher {
@@ -68,6 +106,9 @@ pub struct EdgeWatcher {
     /// so the poll loop only calls `grab`/`ungrab` on an actual
     /// transition, not every tick.
     grabbed: bool,
+    /// Tracked apart from the pointer: another client can briefly hold the
+    /// keyboard, in which case the poll loop retries this grab alone.
+    keyboard_grabbed: bool,
 }
 
 impl EdgeWatcher {
@@ -100,6 +141,7 @@ impl EdgeWatcher {
             was_at_edge: None,
             invisible_cursor,
             grabbed: false,
+            keyboard_grabbed: false,
         })
     }
 
@@ -143,9 +185,30 @@ impl EdgeWatcher {
     /// its clicks/motion while a peer is being controlled, matching
     /// what a KVM switch is expected to feel like. Idempotent.
     pub fn grab(&mut self) {
-        if self.grabbed {
-            return;
+        if !self.grabbed {
+            self.grab_local_pointer();
         }
+        if !self.keyboard_grabbed {
+            self.grab_local_keyboard();
+        }
+    }
+
+    /// Without this, keys typed for the peer also reach the focused local
+    /// window. Capture reads raw evdev, so it is unaffected by the grab.
+    fn grab_local_keyboard(&mut self) {
+        let reply = self.conn
+            .grab_keyboard(false, self.root, x11rb::CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok());
+        if reply.is_some_and(|reply| reply.status == GrabStatus::SUCCESS) {
+            self.keyboard_grabbed = true;
+            tracing::info!("keyboard grabbed while controlling a peer");
+        } else {
+            tracing::debug!("keyboard grab unavailable; retrying");
+        }
+    }
+
+    fn grab_local_pointer(&mut self) {
         let event_mask = EventMask::POINTER_MOTION
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
@@ -177,6 +240,18 @@ impl EdgeWatcher {
 
     /// Idempotent.
     pub fn ungrab(&mut self) {
+        if self.keyboard_grabbed {
+            match self.conn.ungrab_keyboard(x11rb::CURRENT_TIME) {
+                Ok(cookie) => {
+                    if let Err(e) = cookie.check() {
+                        tracing::warn!(error = %e, "XUngrabKeyboard failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "XUngrabKeyboard request failed to send"),
+            }
+            self.keyboard_grabbed = false;
+            tracing::info!("keyboard released");
+        }
         if !self.grabbed {
             return;
         }
@@ -302,6 +377,25 @@ mod tests {
         assert_eq!(edge_for_x(1919, 1920), Some(ScreenEdge::Right));
         assert_eq!(edge_for_x(1920, 1920), Some(ScreenEdge::Right));
         assert_eq!(edge_for_x(1918, 1920), None);
+    }
+
+    #[test]
+    fn assignments_survive_a_save_and_load() {
+        let assignments = EdgeAssignments::from([(ScreenEdge::Right,
+            EdgeTarget { device_id: "A56B".into(), name: "iMac".into() })]);
+        assert_eq!(parse_assignments(&serialize_assignments(&assignments)), assignments);
+    }
+
+    #[test]
+    fn malformed_assignment_lines_are_ignored() {
+        assert!(parse_assignments("top\tid\tname\nleft\tonly-id\n\n").is_empty());
+    }
+
+    #[test]
+    fn saved_device_names_cannot_break_the_line_format() {
+        let assignments = EdgeAssignments::from([(ScreenEdge::Left,
+            EdgeTarget { device_id: "id".into(), name: "a\tb\nc".into() })]);
+        assert_eq!(parse_assignments(&serialize_assignments(&assignments))[&ScreenEdge::Left].name, "a b c");
     }
 
     #[test]

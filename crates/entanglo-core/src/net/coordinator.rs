@@ -54,6 +54,9 @@ struct RemoteCursorState {
     screen_width: f64,
     screen_height: f64,
     buttons_held: u8,
+    /// Linux receivers read coordinates on a fixed 2560 x 1440 canvas
+    /// rather than in their own pixels; see `input::inject::map_absolute`.
+    linux_canvas: bool,
 }
 
 impl RemoteCursorState {
@@ -75,6 +78,23 @@ impl RemoteCursorState {
             screen_width,
             screen_height,
             buttons_held: 0,
+            linux_canvas: false,
+        }
+    }
+
+    fn with_linux_canvas(mut self, linux_canvas: bool) -> Self {
+        self.linux_canvas = linux_canvas;
+        self
+    }
+
+    fn wire_position(&self) -> (f64, f64) {
+        if self.linux_canvas {
+            (
+                self.x / (self.screen_width - 1.0) * 2559.0,
+                self.y / (self.screen_height - 1.0) * 1439.0,
+            )
+        } else {
+            (self.x, self.y)
         }
     }
 
@@ -120,8 +140,9 @@ impl RemoteCursorState {
         // sender-side virtual cursor makes the pointer enter at the
         // physical adjoining edge instead of continuing from the
         // receiver's stale cursor position (its relative fallback).
-        event.x = Some(self.x);
-        event.y = Some(self.y);
+        let (x, y) = self.wire_position();
+        event.x = Some(x);
+        event.y = Some(y);
         event.delta_x = None;
         event.delta_y = None;
         false
@@ -207,6 +228,7 @@ struct PeerHandle {
     outgoing_tx: mpsc::UnboundedSender<OutgoingMessage>,
     device_id: Option<String>,
     screen_size: Option<(f64, f64)>,
+    is_linux: bool,
 }
 
 pub struct Coordinator {
@@ -434,6 +456,7 @@ impl Coordinator {
                 outgoing_tx,
                 device_id: None,
                 screen_size: None,
+                is_linux: false,
             },
         );
         let _ = self
@@ -532,6 +555,7 @@ impl Coordinator {
                     let negotiated_screen_size = peer_screen_size(hello);
                     if let Some(handle) = this.peers.lock().await.get_mut(&conn_id) {
                         handle.screen_size = negotiated_screen_size;
+                        handle.is_linux = hello.platform.as_deref() == Some("Linux");
                     }
                     tracing::info!(
                         conn_id,
@@ -657,13 +681,14 @@ impl Coordinator {
         conn_id: ConnId,
         remote_entry_edge: RemoteEntryEdge,
     ) {
-        let (screen_width, screen_height) = self
+        let (peer_screen, is_linux) = self
             .peers
             .lock()
             .await
             .get(&conn_id)
-            .and_then(|peer| peer.screen_size)
-            .unwrap_or((FALLBACK_REMOTE_SCREEN_WIDTH, FALLBACK_REMOTE_SCREEN_HEIGHT));
+            .map_or((None, false), |peer| (peer.screen_size, peer.is_linux));
+        let (screen_width, screen_height) =
+            peer_screen.unwrap_or((FALLBACK_REMOTE_SCREEN_WIDTH, FALLBACK_REMOTE_SCREEN_HEIGHT));
         tracing::info!(
             conn_id,
             screen_width,
@@ -676,7 +701,7 @@ impl Coordinator {
             remote_entry_edge,
             screen_width,
             screen_height,
-        ));
+        ).with_linux_canvas(is_linux));
     }
 
     pub async fn active_receiver(&self) -> Option<ConnId> {
@@ -1048,6 +1073,7 @@ mod tests {
                 outgoing_tx,
                 device_id: Some("wide-peer".into()),
                 screen_size: Some((5120.0, 2880.0)),
+                is_linux: false,
             },
         );
 
