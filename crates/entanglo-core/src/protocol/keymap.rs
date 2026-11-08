@@ -100,6 +100,40 @@ pub const MAC_TO_LINUX: &[(u16, u16)] = &[
     (109, 68), // F10 -> KEY_F10
     (103, 87), // F11 -> KEY_F11
     (111, 88), // F12 -> KEY_F12
+    // Numeric keypad
+    (82, 82), // Keypad 0 -> KEY_KP0
+    (83, 79), // Keypad 1 -> KEY_KP1
+    (84, 80), // Keypad 2 -> KEY_KP2
+    (85, 81), // Keypad 3 -> KEY_KP3
+    (86, 75), // Keypad 4 -> KEY_KP4
+    (87, 76), // Keypad 5 -> KEY_KP5
+    (88, 77), // Keypad 6 -> KEY_KP6
+    (89, 71), // Keypad 7 -> KEY_KP7
+    (91, 72), // Keypad 8 -> KEY_KP8
+    (92, 73), // Keypad 9 -> KEY_KP9
+    (65, 83), // Keypad . -> KEY_KPDOT
+    (67, 55), // Keypad * -> KEY_KPASTERISK
+    (69, 78), // Keypad + -> KEY_KPPLUS
+    (75, 98), // Keypad / -> KEY_KPSLASH
+    (76, 96), // Keypad Enter -> KEY_KPENTER
+    (78, 74), // Keypad - -> KEY_KPMINUS
+    (81, 117), // Keypad = -> KEY_KPEQUAL
+];
+
+/// Linux keypad keys that act as navigation unless NumLock is on, paired with
+/// the key that always types the same character.
+const KEYPAD_TO_MAIN_KEY: &[(u16, u16)] = &[
+    (82, 11), // KEY_KP0 -> KEY_0
+    (79, 2),  // KEY_KP1 -> KEY_1
+    (80, 3),  // KEY_KP2 -> KEY_2
+    (81, 4),  // KEY_KP3 -> KEY_3
+    (75, 5),  // KEY_KP4 -> KEY_4
+    (76, 6),  // KEY_KP5 -> KEY_5
+    (77, 7),  // KEY_KP6 -> KEY_6
+    (71, 8),  // KEY_KP7 -> KEY_7
+    (72, 9),  // KEY_KP8 -> KEY_8
+    (73, 10), // KEY_KP9 -> KEY_9
+    (83, 52), // KEY_KPDOT -> KEY_DOT
 ];
 
 /// Mouse `button` field (0/1/2, see `PROTOCOL.md` §5.5) to Linux
@@ -115,6 +149,14 @@ pub fn mac_to_linux(mac_code: u16) -> Option<u16> {
         .iter()
         .find(|(mac, _)| *mac == mac_code)
         .map(|(_, linux)| *linux)
+}
+
+/// The key to press on Linux for a received Mac key. Macs have no NumLock, so
+/// keypad digits must type digits whatever this computer's NumLock state is.
+pub fn mac_to_linux_for_injection(mac_code: u16) -> Option<u16> {
+    let linux_code = mac_to_linux(mac_code)?;
+    let main_key = KEYPAD_TO_MAIN_KEY.iter().find(|(keypad, _)| *keypad == linux_code);
+    Some(main_key.map_or(linux_code, |(_, main)| *main))
 }
 
 pub fn linux_to_mac(linux_code: u16) -> Option<u16> {
@@ -155,6 +197,30 @@ mod tests {
             assert_eq!(mac_to_linux(mac_code), Some(linux_code));
             assert_eq!(linux_to_mac(linux_code), Some(mac_code));
         }
+    }
+
+    #[test]
+    fn keypad_digits_type_digits_regardless_of_numlock() {
+        // Mac key codes for keypad 0 to 9.
+        let mac = [82, 83, 84, 85, 86, 87, 88, 89, 91, 92];
+        let digits = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        for (mac_code, digit) in mac.into_iter().zip(digits) {
+            assert_eq!(mac_to_linux_for_injection(mac_code), Some(digit));
+        }
+        assert_eq!(mac_to_linux_for_injection(65), Some(52), "keypad dot");
+    }
+
+    #[test]
+    fn keypad_enter_and_operators_stay_on_the_keypad() {
+        for (mac_code, linux_code) in [(76, 96), (67, 55), (69, 78), (75, 98), (78, 74), (81, 117)] {
+            assert_eq!(mac_to_linux_for_injection(mac_code), Some(linux_code));
+        }
+    }
+
+    #[test]
+    fn linux_keypad_keys_are_sent_as_mac_keypad_keys() {
+        assert_eq!(linux_to_mac(75), Some(86), "keypad 4");
+        assert_eq!(linux_to_mac(96), Some(76), "keypad enter");
     }
 
     #[test]

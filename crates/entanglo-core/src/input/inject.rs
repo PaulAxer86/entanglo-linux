@@ -160,7 +160,7 @@ impl InputInjectionService {
                 let Some(mac_code) = event.key_code else {
                     return Ok(());
                 };
-                let linux_code = keymap::mac_to_linux(mac_code)
+                let linux_code = keymap::mac_to_linux_for_injection(mac_code)
                     .ok_or(InjectionError::UnmappedKeyCode(mac_code))?;
                 self.write_key(linux_code, event.kind == InputEventKind::KeyDown)?;
             }
