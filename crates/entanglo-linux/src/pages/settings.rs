@@ -85,6 +85,7 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
     let shared_clipboard = Rc::clone(shared);
     clipboard_toggle.connect_toggled(move |toggle| {
         shared_clipboard.clipboard.set_enabled(toggle.is_active());
+        crate::clipboard::ClipboardBridge::remember_enabled(toggle.is_active());
     });
     container.append(&clipboard_toggle);
 

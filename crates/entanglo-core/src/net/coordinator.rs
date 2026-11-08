@@ -33,13 +33,15 @@ use super::trust_store::TrustStore;
 pub type ConnId = u64;
 
 /// Edge of the remote screen through which control entered. Crossing
-/// the local left edge enters the remote screen from its right edge,
-/// and vice versa. Only that same remote edge returns control locally,
-/// matching `entanglo-macos`'s anti-loop behavior.
+/// a local edge enters the remote screen from the opposite edge. Only
+/// that same remote edge returns control locally, matching
+/// `entanglo-macos`'s anti-loop behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteEntryEdge {
     Left,
     Right,
+    Top,
+    Bottom,
 }
 
 const FALLBACK_REMOTE_SCREEN_WIDTH: f64 = 2560.0;
@@ -66,15 +68,17 @@ impl RemoteCursorState {
         screen_width: f64,
         screen_height: f64,
     ) -> Self {
-        let x = match entry_edge {
-            RemoteEntryEdge::Left => 0.0,
-            RemoteEntryEdge::Right => screen_width - 1.0,
+        let (x, y) = match entry_edge {
+            RemoteEntryEdge::Left => (0.0, screen_height / 2.0),
+            RemoteEntryEdge::Right => (screen_width - 1.0, screen_height / 2.0),
+            RemoteEntryEdge::Top => (screen_width / 2.0, 0.0),
+            RemoteEntryEdge::Bottom => (screen_width / 2.0, screen_height - 1.0),
         };
         Self {
             conn_id,
             entry_edge,
             x,
-            y: screen_height / 2.0,
+            y,
             screen_width,
             screen_height,
             buttons_held: 0,
@@ -130,6 +134,8 @@ impl RemoteCursorState {
             match self.entry_edge {
                 RemoteEntryEdge::Left if self.x < 0.0 => return true,
                 RemoteEntryEdge::Right if self.x >= self.screen_width => return true,
+                RemoteEntryEdge::Top if self.y < 0.0 => return true,
+                RemoteEntryEdge::Bottom if self.y >= self.screen_height => return true,
                 _ => {}
             }
         }
@@ -1060,6 +1066,24 @@ mod tests {
         current.screen_height = Some(1692);
 
         assert_eq!(peer_screen_size(&current), Some((3008.0, 1692.0)));
+    }
+
+    #[test]
+    fn control_entered_from_the_bottom_returns_only_through_the_bottom() {
+        let mut cursor = RemoteCursorState::new(7, RemoteEntryEdge::Bottom, 1920.0, 1080.0);
+        assert_eq!((cursor.x, cursor.y), (960.0, 1079.0));
+        assert!(!cursor.observe(&mut sample_delta_event(0.0, -5000.0)));
+        assert_eq!(cursor.y, 0.0, "the opposite edge is a wall");
+        assert!(!cursor.observe(&mut sample_delta_event(0.0, 1079.0)));
+        assert!(cursor.observe(&mut sample_delta_event(0.0, 1.0)));
+    }
+
+    #[test]
+    fn control_entered_from_the_top_returns_through_the_top() {
+        let mut cursor = RemoteCursorState::new(7, RemoteEntryEdge::Top, 1920.0, 1080.0);
+        assert_eq!((cursor.x, cursor.y), (960.0, 0.0));
+        assert!(!cursor.observe(&mut sample_delta_event(0.0, 10.0)));
+        assert!(cursor.observe(&mut sample_delta_event(0.0, -11.0)));
     }
 
     #[test]

@@ -95,7 +95,7 @@ impl AppShared {
     pub fn new(backend: Backend) -> Self {
         Self {
             backend,
-            clipboard: ClipboardBridge::new(),
+            clipboard: ClipboardBridge::restored(),
             sounds: SoundPlayer::default(),
             devices_list: gtk::ListBox::new(),
             files_list: gtk::ListBox::new(),

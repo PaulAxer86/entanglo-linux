@@ -38,15 +38,19 @@ use crate::state::AppShared;
 pub enum ScreenEdge {
     Left,
     Right,
+    Top,
+    Bottom,
 }
 
 impl ScreenEdge {
-    pub const ALL: [ScreenEdge; 2] = [ScreenEdge::Left, ScreenEdge::Right];
+    pub const ALL: [ScreenEdge; 4] = [ScreenEdge::Left, ScreenEdge::Right, ScreenEdge::Top, ScreenEdge::Bottom];
 
     pub fn label(self) -> &'static str {
         match self {
             ScreenEdge::Left => "Left edge",
             ScreenEdge::Right => "Right edge",
+            ScreenEdge::Top => "Top edge",
+            ScreenEdge::Bottom => "Bottom edge",
         }
     }
 
@@ -54,6 +58,8 @@ impl ScreenEdge {
         match self {
             ScreenEdge::Left => "left",
             ScreenEdge::Right => "right",
+            ScreenEdge::Top => "top",
+            ScreenEdge::Bottom => "bottom",
         }
     }
 }
@@ -92,6 +98,7 @@ pub struct EdgeWatcher {
     conn: RustConnection,
     root: u32,
     screen_width: i16,
+    screen_height: i16,
     /// Debounces so a cursor held at the edge only triggers once per
     /// crossing, not once per poll — cleared as soon as the cursor
     /// leaves the edge zone (`x11rb`'s coordinates clamp at 0 /
@@ -137,6 +144,7 @@ impl EdgeWatcher {
         Some(Self {
             root,
             screen_width: screen.width_in_pixels as i16,
+            screen_height: screen.height_in_pixels as i16,
             conn,
             was_at_edge: None,
             invisible_cursor,
@@ -168,7 +176,7 @@ impl EdgeWatcher {
     /// (not on every subsequent poll while it stays there).
     pub fn poll(&mut self) -> Option<ScreenEdge> {
         let pointer = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
-        let at_edge = edge_for_x(pointer.root_x, self.screen_width);
+        let at_edge = edge_at(pointer.root_x, pointer.root_y, self.screen_width, self.screen_height);
         let crossed = if at_edge.is_some() && at_edge != self.was_at_edge {
             at_edge
         } else {
@@ -268,6 +276,17 @@ impl EdgeWatcher {
     }
 }
 
+/// Corners count as the side edge.
+fn edge_at(x: i16, y: i16, screen_width: i16, screen_height: i16) -> Option<ScreenEdge> {
+    edge_for_x(x, screen_width).or(if y <= 0 {
+        Some(ScreenEdge::Top)
+    } else if y >= screen_height - 1 {
+        Some(ScreenEdge::Bottom)
+    } else {
+        None
+    })
+}
+
 fn edge_for_x(x: i16, screen_width: i16) -> Option<ScreenEdge> {
     if x <= 0 {
         Some(ScreenEdge::Left)
@@ -353,6 +372,8 @@ fn activate(shared: &Rc<AppShared>, conn_id: ConnId, local_edge: ScreenEdge) {
     let remote_entry_edge = match local_edge {
         ScreenEdge::Left => RemoteEntryEdge::Right,
         ScreenEdge::Right => RemoteEntryEdge::Left,
+        ScreenEdge::Top => RemoteEntryEdge::Bottom,
+        ScreenEdge::Bottom => RemoteEntryEdge::Top,
     };
     shared.backend.handle.spawn(async move {
         coordinator
@@ -388,7 +409,7 @@ mod tests {
 
     #[test]
     fn malformed_assignment_lines_are_ignored() {
-        assert!(parse_assignments("top\tid\tname\nleft\tonly-id\n\n").is_empty());
+        assert!(parse_assignments("center\tid\tname\nleft\tonly-id\n\n").is_empty());
     }
 
     #[test]
@@ -396,6 +417,14 @@ mod tests {
         let assignments = EdgeAssignments::from([(ScreenEdge::Left,
             EdgeTarget { device_id: "id".into(), name: "a\tb\nc".into() })]);
         assert_eq!(parse_assignments(&serialize_assignments(&assignments))[&ScreenEdge::Left].name, "a b c");
+    }
+
+    #[test]
+    fn top_and_bottom_edges_are_detected_and_corners_stay_on_the_side() {
+        assert_eq!(edge_at(960, 0, 1920, 1080), Some(ScreenEdge::Top));
+        assert_eq!(edge_at(960, 1079, 1920, 1080), Some(ScreenEdge::Bottom));
+        assert_eq!(edge_at(960, 540, 1920, 1080), None);
+        assert_eq!(edge_at(0, 0, 1920, 1080), Some(ScreenEdge::Left));
     }
 
     #[test]

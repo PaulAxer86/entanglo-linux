@@ -7,9 +7,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use entanglo_core::net::trust_store;
 use gtk::prelude::*;
 
 use crate::state::AppShared;
+
+const ENABLED_SETTING: &str = "clipboard_sync";
 
 pub struct ClipboardBridge {
     enabled: Cell<bool>,
@@ -27,6 +30,25 @@ impl ClipboardBridge {
             last_text: RefCell::new(None),
             poll_in_flight: Cell::new(false),
             generation: Cell::new(0),
+        }
+    }
+
+    /// A bridge in the state the user last chose.
+    pub fn restored() -> Self {
+        let bridge = Self::new();
+        bridge.set_enabled(trust_store::read_setting(ENABLED_SETTING).is_some());
+        bridge
+    }
+
+    /// Saves the user's choice so it survives restarts and updates.
+    pub fn remember_enabled(enabled: bool) {
+        let saved = if enabled {
+            trust_store::write_setting(ENABLED_SETTING, "enabled")
+        } else {
+            trust_store::remove_setting(ENABLED_SETTING)
+        };
+        if let Err(error) = saved {
+            tracing::warn!(%error, "could not save the clipboard sync setting");
         }
     }
 
