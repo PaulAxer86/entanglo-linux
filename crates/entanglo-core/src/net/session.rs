@@ -175,6 +175,7 @@ pub async fn run_session(
                         let _ = events_tx.send(SessionEvent::Closed { reason: "connection closed".into() });
                         return Ok(());
                     }
+                    Err(e @ TransportError::Io(_)) => return Err(e.into()),
                     Err(e) => {
                         // Per PROTOCOL.md §8, a single bad frame (unknown
                         // messageType, malformed payload) must not end the

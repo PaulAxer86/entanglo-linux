@@ -96,11 +96,16 @@ impl InputCaptureService {
     ) -> Option<InputEventMessage> {
         match event.kind() {
             evdev::InputEventKind::Key(key) => {
-                if event.value() == 2 {
-                    return None;
-                }
-                let pressed = event.value() == 1;
                 let linux_code = key.code();
+                if let Some((media_key, _)) = keymap::MEDIA_TO_LINUX.iter().find(|(_, code)| *code == linux_code) {
+                    return Some(InputEventMessage {
+                        kind: InputEventKind::MediaKey, media_key: Some(*media_key), pressed: Some(event.value() != 0),
+                        x: None, y: None, delta_x: None, delta_y: None, button: None, key_code: None,
+                        modifier_flags: self.modifiers.to_bitmask(), click_state: None,
+                    });
+                }
+                if event.value() == 2 { return None; }
+                let pressed = event.value() == 1;
 
                 // Mouse buttons (BTN_LEFT/RIGHT/MIDDLE) arrive as
                 // ordinary EV_KEY events, same as keyboard keys, but
@@ -247,6 +252,22 @@ mod tests {
     /// before this fix — `linux_to_mac` has no entry for `BTN_LEFT`
     /// (that table is keyboard keys only), so `translate` returned
     /// `None` for every click. Found while wiring Checkpoint D.
+    #[test]
+    fn volume_and_brightness_keys_keep_press_repeat_and_release() {
+        use crate::protocol::payloads::input_event::MediaKey;
+        let mut capture = InputCaptureService::new();
+        for (code, expected) in [(115, MediaKey::VolumeUp), (114, MediaKey::VolumeDown), (113, MediaKey::Mute),
+            (225, MediaKey::BrightnessUp), (224, MediaKey::BrightnessDown)] {
+            for (value, pressed) in [(1, true), (2, true), (0, false)] {
+                let event = capture.translate(InputEvent::new(EventType::KEY, code, value)).unwrap();
+                assert_eq!(event.kind, InputEventKind::MediaKey);
+                assert_eq!(event.media_key, Some(expected));
+                assert_eq!(event.pressed, Some(pressed));
+                assert_eq!(event.key_code, None);
+            }
+        }
+    }
+
     #[test]
     fn left_click_translates_to_mouse_down_not_a_dropped_keycode() {
         let mut capture = InputCaptureService::new();

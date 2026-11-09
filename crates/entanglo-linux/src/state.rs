@@ -126,9 +126,7 @@ impl AppShared {
             let stat = self.network_stats.borrow().get(id).map(|stat| (
                 stat.monitor.average_rtt_ms(), stat.monitor.suggested_mode(),
             ));
-            let interface = row.local_addr.and_then(|address| {
-                self.backend.interfaces.iter().find(|(ip, _)| *ip == address.ip()).map(|(_, name)| name.clone())
-            });
+            let interface = row.local_addr.and_then(|address| entanglo_core::net::path::interface_for_address(address.ip()));
             Some(DashboardPeer {
                 name: row.name.clone(), trusted: group.iter().any(|id| devices[id].trusted),
                 interface, peer_address: row.peer_addr.map(|address| address.ip().to_string()),
@@ -162,8 +160,8 @@ impl AppShared {
         let target = assignments.get(&edge)?;
         self.devices.borrow().iter()
             .filter(|(_, row)| row.trusted && row.device_id.as_deref() == Some(target.device_id.as_str()))
+            .min_by_key(|(conn_id, row)| (entanglo_core::net::path::address_priority(row.local_addr.map(|addr| addr.ip())), **conn_id))
             .map(|(conn_id, _)| *conn_id)
-            .min()
     }
 
     pub fn edge_target(&self, edge: ScreenEdge) -> Option<EdgeTarget> {
@@ -193,8 +191,8 @@ impl AppShared {
     pub fn send_files(&self, device_id: &str, paths: Vec<std::path::PathBuf>) {
         let conn_id = self.devices.borrow().iter()
             .filter(|(_, row)| row.trusted && row.device_id.as_deref() == Some(device_id))
-            .map(|(conn_id, _)| *conn_id)
-            .min();
+            .min_by_key(|(conn_id, row)| (entanglo_core::net::path::address_priority(row.local_addr.map(|addr| addr.ip())), **conn_id))
+            .map(|(conn_id, _)| *conn_id);
         let Some(conn_id) = conn_id else { return };
         let coordinator = Arc::clone(&self.backend.coordinator);
         self.backend.handle.spawn(async move { coordinator.send_files(conn_id, paths) });
@@ -233,16 +231,15 @@ impl AppShared {
 pub fn handle_event(shared: &Rc<AppShared>, event: CoordinatorEvent) {
     match event {
         CoordinatorEvent::PeerDiscovered(peer) => {
-            let mut discovered=shared.discovered.borrow_mut();
-            if let Some(previous)=discovered.get_mut(&peer.device_name) {
-                let mut addresses=previous.addresses.clone();addresses.extend(peer.addresses.iter().copied());addresses.sort();addresses.dedup();
-                *previous=peer;previous.addresses=addresses;
-            } else {discovered.insert(peer.device_name.clone(),peer);}
-            drop(discovered);
+            shared.discovered.borrow_mut().insert(peer.cache_key(), peer);
             redraw_devices(shared);
         }
         CoordinatorEvent::PeerDiscoveryRemoved(name) => {
-            shared.discovered.borrow_mut().remove(&name);
+            shared.discovered.borrow_mut().retain(|_, peer| peer.device_name != name);
+            redraw_devices(shared);
+        }
+        CoordinatorEvent::PeerDiscoveryEndpointRemoved(event) => {
+            shared.discovered.borrow_mut().retain(|_, peer| !event.removes(peer));
             redraw_devices(shared);
         }
         CoordinatorEvent::PeerConnected { conn_id, direction, local_addr, peer_addr } => {
@@ -400,7 +397,9 @@ fn device_groups(devices: &HashMap<ConnId, DeviceRow>) -> Vec<Vec<ConnId>> {
         by_device.entry(key).or_default().push(conn_id);
     }
     let mut groups: Vec<_> = by_device.into_values().collect();
-    for group in &mut groups { group.sort_unstable(); }
+    for group in &mut groups {
+        group.sort_by_key(|id| (entanglo_core::net::path::address_priority(devices[id].local_addr.map(|addr| addr.ip())), *id));
+    }
     groups.sort_by_key(|group| group[0]);
     groups
 }
@@ -448,6 +447,9 @@ fn redraw_devices(shared: &Rc<AppShared>) {
         detail.set_xalign(0.0);
         detail.add_css_class("dim-label");
         identity.append(&detail);
+        let interface = row.local_addr.and_then(|address| entanglo_core::net::path::interface_for_address(address.ip()));
+        let path_label = match entanglo_core::net::path::interface_priority(interface.as_deref()) { 0 => "Ethernet", 1 => "Wi-Fi", _ => "Network" };
+        let path_icon = if path_label == "Wi-Fi" { "network-wireless-symbolic" } else { "network-wired-symbolic" };
         let connections = group.iter().map(|id| match devices[id].direction {
             Direction::Inbound => "Inbound: connection opened by this device",
             Direction::Outbound => "Outbound: connection opened by this iMac",
@@ -475,7 +477,7 @@ fn redraw_devices(shared: &Rc<AppShared>) {
         capabilities.append(&capability_icon("text-x-generic-symbolic",
             if trusted { "Receive files from this device into Downloads/Entanglo" }
             else { "File reception blocked: device not trusted" }, trusted));
-        capabilities.append(&capability_icon("network-wired-symbolic", &format!("Device connected\n{connections}"), true));
+        capabilities.append(&capability_icon(path_icon, &format!("{path_label} · {}\n{connections}", interface.as_deref().unwrap_or("unknown")), true));
         entry.append(&capabilities);
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -542,10 +544,14 @@ fn redraw_devices(shared: &Rc<AppShared>) {
         shared.devices_list.append(&entry);
     }
     let discovered = shared.discovered.borrow();
-    for peer in discovered.values() {
-        let connected = devices.values().any(|row| row.peer_addr.is_some_and(|address| {
-            peer.addresses.contains(&address.ip().to_canonical())
-        }));
+    let mut paths: Vec<_> = discovered.values().collect();
+    paths.sort_by_key(|peer| (peer.priority(), peer.cache_key()));
+    let mut shown = std::collections::HashSet::new();
+    for peer in paths {
+        let identity = peer.device_id.as_ref().unwrap_or(&peer.device_name);
+        if !shown.insert(identity) { continue; }
+        let connected = devices.values().any(|row| row.device_id.as_ref().is_some_and(|id| peer.device_id.as_ref() == Some(id))
+            || row.peer_addr.is_some_and(|address| peer.addresses.contains(&address.ip().to_canonical())));
         if connected { continue; }
         // Resolve metadata is not authorization; trust is granted only after
         // the peer's real protocol identity has been exchanged.

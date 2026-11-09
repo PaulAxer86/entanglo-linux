@@ -68,6 +68,23 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
     sharing.add(&restart_row);
     let (row, receiver) = value_row("Receive remote keyboard & mouse");
     sharing.add(&row);
+    let speed_row = adw::ActionRow::builder()
+        .title("Remote pointer speed")
+        .subtitle("Adjust this computer's mouse on other screens. Local pointer and scrolling stay unchanged.")
+        .use_markup(false).build();
+    let speed = gtk::SpinButton::with_range(0.25, 4.0, 0.25);
+    speed.set_digits(2);
+    speed.set_value(shared.backend.coordinator.remote_pointer_speed());
+    speed.set_valign(gtk::Align::Center);
+    speed.set_tooltip_text(Some("Multiplier: 1.00 is the original speed; increase for a slow mouse"));
+    let coordinator = std::sync::Arc::clone(&shared.backend.coordinator);
+    speed.connect_value_changed(move |value| {
+        if let Err(error) = coordinator.set_remote_pointer_speed(value.value()) {
+            tracing::warn!(%error, "could not save remote pointer speed");
+        }
+    });
+    speed_row.add_suffix(&speed);
+    sharing.add(&speed_row);
     column.append(&sharing);
 
     let status = section("Status");

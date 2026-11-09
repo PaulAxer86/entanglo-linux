@@ -8,7 +8,6 @@
 //! inside a `glib::spawn_future_local` loop running on the main
 //! context.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use entanglo_core::logging::LogBuffer;
@@ -31,7 +30,6 @@ pub struct Backend {
     pub local_hello: HelloPayload,
     pub log_buffer: LogBuffer,
     pub discovery: Option<Arc<DiscoveryService>>,
-    pub interfaces: Vec<(std::net::IpAddr, String)>,
 }
 
 struct Ready {
@@ -46,7 +44,6 @@ struct Ready {
 /// before the GTK main loop starts.
 pub fn start(log_buffer: LogBuffer) -> (Backend, async_channel::Receiver<CoordinatorEvent>) {
     let screen_size = local_screen_size();
-    let interfaces = local_interfaces();
     let local_hello = HelloPayload {
         device_name: local_device_name(),
         device_model: "Linux".to_string(),
@@ -149,7 +146,6 @@ pub fn start(log_buffer: LogBuffer) -> (Backend, async_channel::Receiver<Coordin
             local_hello,
             log_buffer,
             discovery: ready.discovery,
-            interfaces,
         },
         ui_rx,
     )
@@ -193,152 +189,67 @@ fn spawn_discovery(coordinator: Arc<Coordinator>, device_name: String, port: u16
     if let Err(e) = discovery.advertise_identity(&device_name, port, Some(&local_device_id)) {
         tracing::warn!(error = %e, "mDNS advertise failed");
     }
-    // A receiver advertises itself; the controller opens the connection.
-    // This avoids a second Mac-side device keyed by the Linux hello UUID
-    // alongside the device keyed by the Bonjour service name.
-    if std::env::var_os("ENTANGLO_RECEIVER_ONLY").is_some() {
-        tracing::info!("receiver-only discovery: advertising, automatic reconnect enabled");
-        let candidates = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, entanglo_core::net::DiscoveredPeer>::new()));
-        if let Ok(events) = discovery.browse_events() {
-            let coordinator = Arc::clone(&coordinator);
-            let candidates = Arc::clone(&candidates);
-            let local_name = format!("{device_name}.{}", entanglo_core::net::SERVICE_TYPE);
-            tokio::task::spawn_blocking(move || {
-                while let Ok(event) = events.recv() {
-                    if matches!(&event, entanglo_core::net::DiscoveryEvent::Resolved(peer) if peer.device_name == local_name || peer.device_id.as_ref() == Some(&local_device_id)) { continue; }
-                    if let entanglo_core::net::DiscoveryEvent::Resolved(peer) = &event {
-                        tracing::info!(name=%peer.device_name, interface=?peer.interface, "Bonjour peer discovered");
-                        let key=format!("{}|{}|{}",peer.device_name,peer.interface.as_deref().unwrap_or(""),peer.host);
-                        candidates.lock().unwrap().insert(key,peer.clone());
-                        let peer=peer.clone();let coordinator=Arc::clone(&coordinator);
-                        tokio::runtime::Handle::current().spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            match tokio::time::timeout(std::time::Duration::from_secs(3),coordinator.connect_discovered(&peer)).await {
-                                Ok(Ok(()))=>{},result=>tracing::info!(?result,"discovered-controller reconnect attempt finished"),
-                            }
-                        });
-                    }
-                    if let entanglo_core::net::DiscoveryEvent::Removed(name)=&event { candidates.lock().unwrap().retain(|_,peer| &peer.device_name != name); }
-                    coordinator.report_discovery(event);
-                }
-            });
-        }
-        let reconnect_discovery = Arc::clone(&discovery);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                if coordinator.needs_reconnect().await {
-                    let peers: Vec<_> = candidates.lock().unwrap().values().cloned().collect();
-                    for peer in peers {
-                        match tokio::time::timeout(std::time::Duration::from_secs(3),coordinator.connect_discovered(&peer)).await {
-                            Ok(Ok(()))=>{},result=>tracing::info!(?result,"cached-controller reconnect attempt finished"),
-                        }
-                    }
-                    let service = Arc::clone(&reconnect_discovery);
-                    tracing::info!("no connected controller; refreshing Bonjour announcement");
-                    match tokio::task::spawn_blocking(move || service.refresh()).await {
-                        Ok(Ok(())) => {},
-                        result => tracing::warn!(?result, "Bonjour reconnect refresh failed"),
-                    }
-                }
-            }
-        });
-        return Some(discovery);
-    }
-    let peer_rx = match discovery.browse() {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::warn!(error = %e, "mDNS browse failed");
+    let receiver_only = std::env::var_os("ENTANGLO_RECEIVER_ONLY").is_some();
+    let events = match discovery.browse_events() {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(%error, "mDNS browse failed");
             return Some(discovery);
         }
     };
-
-    // The single dial below covers first contact; this restores trusted
-    // devices after a dropped link, which neither side would otherwise retry.
     let candidates = Arc::new(std::sync::Mutex::new(
         std::collections::HashMap::<String, entanglo_core::net::DiscoveredPeer>::new(),
     ));
     {
         let candidates = Arc::clone(&candidates);
         let coordinator = Arc::clone(&coordinator);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let peers: Vec<_> = candidates.lock().unwrap().values().cloned().collect();
-                for peer in peers {
-                    let attempt = coordinator.connect_discovered(&peer);
-                    if let Ok(Err(error)) = tokio::time::timeout(std::time::Duration::from_secs(3), attempt).await {
-                        tracing::debug!(%error, name = %peer.device_name, "trusted device reconnect failed");
-                    }
+        let local_name = format!("{device_name}.{}", entanglo_core::net::SERVICE_TYPE);
+        tokio::task::spawn_blocking(move || {
+            while let Ok(event) = events.recv() {
+                if matches!(&event, entanglo_core::net::DiscoveryEvent::Resolved(peer)
+                    if peer.device_name == local_name || peer.device_id.as_ref() == Some(&local_device_id)) { continue; }
+                {
+                    let mut cache = candidates.lock().unwrap();
+                    if let entanglo_core::net::DiscoveryEvent::Resolved(peer) = &event {
+                        tracing::debug!(name = %peer.device_name, interface = ?peer.interface, host = %peer.host, "Bonjour path discovered");
+                        cache.insert(peer.cache_key(), peer.clone());
+                    } else { cache.retain(|_, peer| !event.removes(peer)); }
                 }
+                coordinator.report_discovery(event);
             }
         });
     }
-
+    let reconnect_discovery = Arc::clone(&discovery);
     tokio::spawn(async move {
-        let mut peer_rx = peer_rx;
-        // mDNS keeps re-announcing every advertised service (itself
-        // included — our own advertisement is just another
-        // `_entanglo._tcp` service from the browser's point of view),
-        // and each re-announcement can carry a different one of the
-        // service's several addresses (LAN, VPN, link-local IPv6...).
-        // Without this, a single real peer gets dialed over and over
-        // on every rediscovery, opening a fresh connection — and, for
-        // a peer that isn't trusted yet, sending it a fresh
-        // `pairRequest` — every time. One dial attempt per advertised
-        // service name for this process's lifetime is enough.
-        let mut already_dialed = std::collections::HashSet::new();
-
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+        interval.tick().await;
+        let mut first_contacts = std::collections::HashSet::new();
+        let mut last_refresh = std::time::Instant::now();
         loop {
-            let (peer_rx_back, message) = tokio::task::spawn_blocking(move || {
-                let message = peer_rx.recv();
-                (peer_rx, message)
-            })
-            .await
-            .expect("discovery relay task panicked");
-            peer_rx = peer_rx_back;
-
-            let Ok(peer) = message else {
-                tracing::debug!("mDNS daemon stopped, discovery ended");
-                return;
-            };
-            candidates.lock().unwrap().insert(
-                format!("{}|{}|{}", peer.device_name, peer.interface.as_deref().unwrap_or(""), peer.host),
-                peer.clone(),
-            );
-            if !already_dialed.insert(peer.device_name.clone()) {
-                continue; // already dialing or connected to this service
+            // Collect announcements briefly: Ethernet and Wi-Fi results for
+            // the same UUID arrive separately and in no guaranteed order.
+            interval.tick().await;
+            let mut peers: Vec<_> = candidates.lock().unwrap().values().cloned().collect();
+            peers.sort_by_key(|peer| (peer.priority(), !peer.endpoint().is_some_and(|address| address.is_ipv4()), peer.cache_key()));
+            for peer in peers {
+                let result = tokio::time::timeout(std::time::Duration::from_secs(3), coordinator.connect_discovered(&peer)).await;
+                if !matches!(result, Ok(Ok(()))) {
+                    tracing::debug!(?result, name = %peer.device_name, interface = ?peer.interface, "trusted path connection attempt finished");
+                }
+                if !receiver_only && first_contacts.insert(peer.device_name.clone()) {
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(3), coordinator.connect_first_contact(&peer)).await;
+                    if !matches!(result, Ok(Ok(()))) { first_contacts.remove(&peer.device_name); }
+                }
             }
-            let Ok(ip) = peer.host.parse::<std::net::IpAddr>() else {
-                tracing::debug!(host = %peer.host, "discovered peer host isn't a plain IP, skipping");
-                already_dialed.remove(&peer.device_name);
-                continue;
-            };
-            let addr = SocketAddr::new(ip, peer.port);
-            tracing::info!(%addr, name = %peer.device_name, "discovered Entanglo peer, dialing");
-            if let Err(e) = coordinator.dial(addr).await {
-                tracing::warn!(error = %e, %addr, "dial failed");
-                // Didn't actually reach the peer — allow a later
-                // rediscovery (possibly with a better address, e.g.
-                // a scoped IPv6 vs. a bare link-local one) to retry,
-                // rather than giving up on this service permanently.
-                already_dialed.remove(&peer.device_name);
+            if receiver_only && last_refresh.elapsed() >= std::time::Duration::from_secs(10)
+                && coordinator.needs_reconnect().await {
+                let service = Arc::clone(&reconnect_discovery);
+                if let Err(error) = tokio::task::spawn_blocking(move || service.refresh()).await {
+                    tracing::warn!(%error, "Bonjour reconnect refresh failed");
+                }
+                last_refresh = std::time::Instant::now();
             }
         }
     });
     Some(discovery)
-}
-
-fn local_interfaces() -> Vec<(std::net::IpAddr, String)> {
-    let Ok(output) = std::process::Command::new("ip").args(["-o", "address", "show"]).output() else { return Vec::new(); };
-    String::from_utf8_lossy(&output.stdout).lines().filter_map(|line| {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        let name = fields.get(1)?.split('@').next()?.to_string();
-        let address = fields.get(3)?.split('/').next()?.parse().ok()?;
-        Some((address, name))
-    }).collect()
 }

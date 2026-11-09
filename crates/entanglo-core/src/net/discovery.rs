@@ -16,6 +16,12 @@ pub struct DiscoveredPeer {
     pub interface: Option<String>,
 }
 impl DiscoveredPeer {
+    pub fn cache_key(&self) -> String {
+        format!("{}|{}|{}", self.device_name, self.interface.as_deref().unwrap_or(""), self.host)
+    }
+    pub fn priority(&self) -> u8 {
+        super::path::interface_priority(self.interface.as_deref())
+    }
     pub fn endpoint(&self) -> Option<SocketAddr> {
         let ip = self.host.parse::<IpAddr>().ok()?;
         if let IpAddr::V6(ip) = ip {
@@ -30,7 +36,22 @@ impl DiscoveredPeer {
     }
 }
 #[derive(Debug, Clone)]
-pub enum DiscoveryEvent { Resolved(DiscoveredPeer), Removed(String) }
+pub enum DiscoveryEvent {
+    Resolved(DiscoveredPeer),
+    Removed(String),
+    RemovedOnInterface { name: String, interface: String, ipv4: bool },
+}
+impl DiscoveryEvent {
+    pub fn removes(&self, peer: &DiscoveredPeer) -> bool {
+        match self {
+            Self::Removed(name) => peer.device_name == *name,
+            Self::RemovedOnInterface { name, interface, ipv4 } => peer.device_name == *name
+                && peer.interface.as_ref() == Some(interface)
+                && peer.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv4() == *ipv4),
+            Self::Resolved(_) => false,
+        }
+    }
+}
 
 pub struct DiscoveryService {
     daemon: Mutex<Option<ServiceDaemon>>,
@@ -175,7 +196,7 @@ pub fn parse_avahi_line(line: &str) -> Option<DiscoveryEvent> {
     let fields:Vec<_>=line.split(';').collect();
     if fields.len()<6 || fields[4]!="_entanglo._tcp" {return None;}
     let name=decode_name(fields[3]);let service=format!("{name}._entanglo._tcp.local.");
-    if fields[0]=="-" {return Some(DiscoveryEvent::Removed(service));}
+    if fields[0]=="-" {return Some(DiscoveryEvent::RemovedOnInterface { name: service, interface: fields[1].into(), ipv4: fields[2] == "IPv4" });}
     if fields[0]!="=" || fields.len()<9 {return None;}
     let address=fields[7].split('%').next()?.parse::<IpAddr>().ok()?;
     let id=fields.get(9).and_then(|txt|txt.split_whitespace().find_map(|part|part.trim_matches('"').strip_prefix("id=").map(str::to_owned)));
@@ -185,6 +206,30 @@ pub fn parse_avahi_line(line: &str) -> Option<DiscoveryEvent> {
 mod tests {
     use super::*;
     #[test]
+    fn removing_wifi_keeps_the_same_devices_ethernet_and_other_address_family() {
+        let resolve = |interface: &str, family: &str, address: &str| {
+            let line = format!("=;{interface};{family};Peer;_entanglo._tcp;local;peer.local;{address};55555;\"id=one-device\"");
+            let DiscoveryEvent::Resolved(peer) = parse_avahi_line(&line).unwrap() else { panic!() };
+            peer
+        };
+        let wired = resolve("eth0", "IPv4", "169.254.1.2");
+        let wifi = resolve("wlan0", "IPv4", "192.0.2.7");
+        let wifi6 = resolve("wlan0", "IPv6", "fe80::2");
+        let event = parse_avahi_line("-;wlan0;IPv4;Peer;_entanglo._tcp;local").unwrap();
+        assert!(event.removes(&wifi));
+        assert!(!event.removes(&wired));
+        assert!(!event.removes(&wifi6));
+        assert_ne!(wired.cache_key(), wifi.cache_key());
+    }
+
+    #[test]
+    fn link_local_ipv6_keeps_its_interface_scope() {
+        let DiscoveryEvent::Resolved(peer) = parse_avahi_line("=;lo;IPv6;Peer;_entanglo._tcp;local;peer.local;fe80::2;55555;\"id=peer\"").unwrap() else { panic!() };
+        let SocketAddr::V6(endpoint) = peer.endpoint().unwrap() else { panic!() };
+        assert_ne!(endpoint.scope_id(), 0);
+    }
+
+    #[test]
     fn avahi_resolution_preserves_identity_and_interface() {
         let DiscoveryEvent::Resolved(peer)=parse_avahi_line("=;eth0;IPv4;Office\\032Mac;_entanglo._tcp;local;mac.local;192.0.2.7;55555;\"id=stable-uuid\"").unwrap() else {panic!()};
         assert_eq!(peer.device_name,"Office Mac._entanglo._tcp.local.");assert_eq!(peer.device_id.as_deref(),Some("stable-uuid"));
@@ -192,7 +237,7 @@ mod tests {
     }
     #[test]
     fn avahi_removal_is_not_a_new_device_and_invalid_records_are_ignored() {
-        assert!(matches!(parse_avahi_line("-;eth0;IPv4;Mac;_entanglo._tcp;local"),Some(DiscoveryEvent::Removed(_))));
+        assert!(matches!(parse_avahi_line("-;eth0;IPv4;Mac;_entanglo._tcp;local"),Some(DiscoveryEvent::RemovedOnInterface { .. })));
         assert!(parse_avahi_line("=;eth0;IPv4;Printer;_ipp._tcp;local;printer;192.0.2.1;631;").is_none());
         assert!(parse_avahi_line("=;bad").is_none());
     }

@@ -146,6 +146,21 @@ pub const MOUSE_BUTTON_TO_LINUX: &[(u8, u16)] = &[
     (2, 0x112), // middle -> BTN_MIDDLE
 ];
 
+/// Existing protocol media names mapped to Linux input-event-codes.h.
+pub const MEDIA_TO_LINUX: &[(crate::protocol::payloads::input_event::MediaKey, u16)] = &[
+    (crate::protocol::payloads::input_event::MediaKey::Mute, 113),
+    (crate::protocol::payloads::input_event::MediaKey::VolumeDown, 114),
+    (crate::protocol::payloads::input_event::MediaKey::VolumeUp, 115),
+    (crate::protocol::payloads::input_event::MediaKey::Eject, 161),
+    (crate::protocol::payloads::input_event::MediaKey::Next, 163),
+    (crate::protocol::payloads::input_event::MediaKey::PlayPause, 164),
+    (crate::protocol::payloads::input_event::MediaKey::Previous, 165),
+    (crate::protocol::payloads::input_event::MediaKey::Rewind, 168),
+    (crate::protocol::payloads::input_event::MediaKey::FastForward, 208),
+    (crate::protocol::payloads::input_event::MediaKey::BrightnessDown, 224),
+    (crate::protocol::payloads::input_event::MediaKey::BrightnessUp, 225),
+];
+
 pub fn mac_to_linux(mac_code: u16) -> Option<u16> {
     MAC_TO_LINUX
         .iter()

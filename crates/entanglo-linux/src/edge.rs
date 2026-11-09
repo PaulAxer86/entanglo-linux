@@ -172,6 +172,21 @@ impl EdgeWatcher {
         Ok(cursor)
     }
 
+    fn restore_pointer(&mut self, edge: RemoteEntryEdge, fraction: f64) {
+        if let Ok(cookie) = self.conn.get_geometry(self.root) {
+            if let Ok(geometry) = cookie.reply() {
+                self.screen_width = geometry.width as i16;
+                self.screen_height = geometry.height as i16;
+            }
+        }
+        let (x, y) = return_position(edge, fraction, self.screen_width, self.screen_height);
+        if let Ok(cookie) = self.conn.warp_pointer(x11rb::NONE, self.root, 0, 0, 0, 0, x, y) {
+            let _ = cookie.check();
+        }
+        let _ = self.conn.flush();
+        self.was_at_edge = None;
+    }
+
     /// Returns `Some(edge)` the moment the cursor arrives at an edge
     /// (not on every subsequent poll while it stays there).
     pub fn poll(&mut self) -> Option<ScreenEdge> {
@@ -276,6 +291,23 @@ impl EdgeWatcher {
     }
 }
 
+/// Return just inside the controller's adjoining edge. Preserve the
+/// normalized position along that edge across different screen sizes.
+fn return_position(remote_entry: RemoteEntryEdge, fraction: f64, width: i16, height: i16) -> (i16, i16) {
+    let right = (width - 1).max(0);
+    let bottom = (height - 1).max(0);
+    let inset_x = (right / 2).min(2);
+    let inset_y = (bottom / 2).min(2);
+    let x = (fraction.clamp(0.0, 1.0) * f64::from(right)).round() as i16;
+    let y = (fraction.clamp(0.0, 1.0) * f64::from(bottom)).round() as i16;
+    match remote_entry {
+        RemoteEntryEdge::Left => (right - inset_x, y.clamp(inset_y, bottom - inset_y)),
+        RemoteEntryEdge::Right => (inset_x, y.clamp(inset_y, bottom - inset_y)),
+        RemoteEntryEdge::Top => (x.clamp(inset_x, right - inset_x), bottom - inset_y),
+        RemoteEntryEdge::Bottom => (x.clamp(inset_x, right - inset_x), inset_y),
+    }
+}
+
 /// Corners count as the side edge.
 fn edge_at(x: i16, y: i16, screen_width: i16, screen_height: i16) -> Option<ScreenEdge> {
     edge_for_x(x, screen_width).or(if y <= 0 {
@@ -313,6 +345,9 @@ pub fn start(shared: &Rc<AppShared>) {
     };
     let shared = Rc::clone(shared);
     glib::source::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        if let Some((edge, fraction)) = shared.backend.coordinator.take_pointer_return() {
+            watcher.restore_pointer(edge, fraction);
+        }
         if let Some(edge) = watcher.poll() {
             // The hidden X11 cursor is still free to move while raw
             // evdev events control the peer. It can therefore leave and
@@ -385,6 +420,15 @@ fn activate(shared: &Rc<AppShared>, conn_id: ConnId, local_edge: ScreenEdge) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_uses_the_adjoining_edge_instead_of_the_hidden_local_position() {
+        assert_eq!(return_position(RemoteEntryEdge::Left, 0.5, 2560, 1440), (2557, 720));
+        assert_eq!(return_position(RemoteEntryEdge::Right, 0.25, 1920, 1080), (2, 270));
+        assert_eq!(return_position(RemoteEntryEdge::Top, 0.5, 1920, 1080), (960, 1077));
+        assert_eq!(return_position(RemoteEntryEdge::Bottom, 0.5, 1920, 1080), (960, 2));
+        assert_eq!(edge_at(2557, 720, 2560, 1440), None, "return must not immediately trigger another crossing");
+    }
 
     #[test]
     fn left_edge_is_x_at_or_below_zero() {
