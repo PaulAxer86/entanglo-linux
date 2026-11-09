@@ -2,6 +2,13 @@
 
 Last updated 2026-11-09. Read this first; `docs/DEV.md` holds the older history.
 
+## 0.1.15 update release — 2026-11-09
+
+Requested version bump so existing 0.1.14 installations receive an update
+through the website manifest. This release retains the 0.1.14 input and
+Ethernet fixes; no additional behavior change is claimed. Publication is
+pending the Debian 12 build, package verification and website deployment.
+
 ## 0.1.14 deployed — 2026-11-09
 
 Direct Ethernet selection, media keys, cursor return and adjustable remote

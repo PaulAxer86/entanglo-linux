@@ -29,7 +29,7 @@ except urllib.error.HTTPError as error:
 package = root / f'dist/entanglo-linux_{version}_amd64.deb'
 manifest = {
     'version': version, 'date': datetime.date.today().isoformat(),
-    'title': 'Linux: direct Ethernet, media keys and improved pointer control',
+    'title': f'Linux {version}: direct Ethernet, media keys and improved pointer control',
     'url': f'https://github.com/{repository}/releases/download/v{version}/{package.name}',
     'sha256': hashlib.sha256(package.read_bytes()).hexdigest(), 'size': package.stat().st_size,
     'minimumSystemVersion': 'Debian 12', 'architecture': 'amd64',
