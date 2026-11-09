@@ -2,7 +2,7 @@
 
 Last updated 2026-11-09. Read this first; `docs/DEV.md` holds the older history.
 
-## 0.1.16 pointer-capture fix in progress
+## 0.1.16 pointer-capture fix deployed — 2026-11-09
 
 Task LINUX-POINTER-CAPTURE-001: X11 grab status was ignored and the local
 pointer was not confined. The fix requires successful mouse/keyboard grabs
@@ -29,18 +29,25 @@ iMac1. Both iMacs now run Debian 13.
 
 ## Current state
 
-- Published: **0.1.14**, Linux source commit `96e9a9f`, website commit `396974b`.
-- Both iMacs run the official release executable as a personal installation
+- Published: **0.1.16**, Linux source commit `221e922`, website commit `e397291`.
+  The requested 0.1.15 update was also published (`5df7df1`, website `4600199`)
+  and is retained unchanged in release history.
+- Both iMacs run the official 0.1.16 executable as a personal installation
   (`~/.local/bin/entanglo-linux`), selected by their user desktop launchers.
   iMac2's existing autostart was updated too. System 0.1.13 remains available
   for rollback. Device identity, trust and edge assignments were retained.
-- Live: both peers report 0.1.14; the TCP session uses direct Ethernet.
+- Live: both peers report 0.1.16; the TCP session uses direct Ethernet.
+- The local pointer is now confined and hidden during remote control. X11
+  grab denial cannot enable forwarding. A real iMac1 control session yielded
+  26 captured samples at the same local coordinates; iMac2 received trusted
+  input and subsequent natural return released the local pointer.
 - Follow-up acceptance: disabling Ethernet for 12 seconds produced a trusted
   Wi-Fi session; restoring the profile automatically established scoped IPv6
   Ethernet again. The existing Wi-Fi socket remains available as fallback.
   iMac1 remote pointer speed is 2.0; iMac2 keeps the default 1.0.
-- Release/website CI and all 116 workspace tests passed. The live manifest
-  exactly matches the verified release, and the download page serves 0.1.14.
+- Release/website CI passed: 117 regular workspace tests plus the separate
+  real X11 confinement regression. The public 0.1.16 manifest exactly matches
+  the verified package and the download page serves the new release.
 - Brightness: iMac2 exposes `nv_backlight`; iMac1 currently has no backlight
   device or KDE brightness display. Media forwarding cannot supply missing
   display-driver support on iMac1.

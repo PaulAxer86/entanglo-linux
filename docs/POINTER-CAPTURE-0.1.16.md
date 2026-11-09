@@ -48,3 +48,27 @@ on Xvfb display :95. The cursor mask is explicitly cleared before cursor
 creation; X11 pixmap allocation does not guarantee initialized pixels.
 The confinement window is centered using current root geometry, away from
 desktop hot corners. Website build and `git diff --check` passed.
+
+## Release and deployment receipt
+
+- Source release commit: `221e922d5bb640909e60acebb82378bacce6685f`.
+- Release: https://github.com/PaulAxer86/entanglo-linux/releases/tag/v0.1.16
+- Main workflow `42700103456` passed, including the dedicated Xvfb step.
+- Website commit `e397291`: Cloudflare Pages reports success. The live
+  download page links to 0.1.16 and the manifest exactly matches the release.
+- Package: 2,753,876 bytes; SHA-256
+  `caba4434790376dea2515f4162d2f3d98ec9d386261812fad30d12dc2071aba5`.
+- Official executable on both iMacs: SHA-256
+  `244ec856249a23cc4b47af9b3be22bf7b754a20eebd4037a60c9fa608c249f61`.
+- Both programs were restarted with the official binary and report 0.1.16
+  over their direct Ethernet connection. Trust, edge assignments and pointer
+  speed preferences were preserved. The previous executable is saved as
+  `~/Documents/entanglo-0.1.14-rollback/entanglo-before-pointer-fix`.
+- Before final official-binary replacement, an actual iMac1 control session
+  produced 26 captured X11 pointer samples, all at `(1280, 720)`. iMac2 logged
+  trusted input, and iMac1 later logged natural return and pointer release.
+  Evidence: `~/Documents/entanglo-0.1.14-rollback/pointer-confinement-live.json`.
+- The 0.1.15 release remains immutable and recorded on the website; the newly
+  reported pointer bug was corrected in 0.1.16 rather than replacing it.
+
+This receipt changes documentation only; the tested release source is intact.
