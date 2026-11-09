@@ -2,18 +2,29 @@
 
 Last updated 2026-11-09. Read this first; `docs/DEV.md` holds the older history.
 
-## 0.1.14 release work — LINUX-ETHERNET-001
+## 0.1.14 deployed — 2026-11-09
 
 Direct Ethernet selection, media keys, cursor return and adjustable remote
 pointer speed are implemented;
 see [the task, validation and rollback](docs/ETHERNET-0.1.14.md). Release
-publication and live two-peer acceptance must be verified before marking
-this rollout complete. No Thunderbolt interface is currently detected on
+publication and both-machine installation are verified. The user still needs
+to assess physical media keys, pointer return and Mighty Mouse sensitivity. No Thunderbolt interface is currently detected on
 iMac1. Both iMacs now run Debian 13.
 
 ## Current state
 
-- Published: **0.1.13**, Linux commit `72a51a7`, website commit `8dedf59`.
+- Published: **0.1.14**, Linux source commit `96e9a9f`, website commit `396974b`.
+- Both iMacs run the official release executable as a personal installation
+  (`~/.local/bin/entanglo-linux`), selected by their user desktop launchers.
+  iMac2's existing autostart was updated too. System 0.1.13 remains available
+  for rollback. Device identity, trust and edge assignments were retained.
+- Live: both peers report 0.1.14; the TCP session uses direct Ethernet.
+  iMac1 remote pointer speed is 2.0; iMac2 keeps the default 1.0.
+- Release/website CI and all 116 workspace tests passed. The live manifest
+  exactly matches the verified release, and the download page serves 0.1.14.
+- Brightness: iMac2 exposes `nv_backlight`; iMac1 currently has no backlight
+  device or KDE brightness display. Media forwarding cannot supply missing
+  display-driver support on iMac1.
 - One `.deb`, built on Debian 12, runs on Debian 12 and 13 (amd64, X11).
 - Working live: mouse, keyboard and clipboard in both directions, Linux as
   controller on all four screen edges, keypad, tray, start at login, verified
@@ -26,7 +37,7 @@ iMac1. Both iMacs now run Debian 13.
 | Name | System | Role |
 | --- | --- | --- |
 | iMac 2 | Debian 13, KDE, X11, small keyboard | Development machine |
-| iMac 1 | macOS, Entanglo 0.1.60, full keyboard | Moves to Debian in a few days |
+| iMac 1 | Debian 13, KDE, X11, Apple A1016 and Mighty Mouse | Linux workstation |
 | lenovo | Debian 12 laptop | Debian 12 test machine |
 | SERVERP | Windows 11, monitor above the iMacs | Windows peer |
 
@@ -43,11 +54,12 @@ The two iMacs also have a direct cable, using link-local addressing.
    confirmed), and drag and drop into the Files page.
 3. **Persist file history.** Rows are rebuilt from `Downloads/Entanglo` at
    startup, so sender names and sent files are lost on restart.
-4. **Linux Devices page:** the connection icon is always the wired one, even on
-   Wi-Fi. Use the real interface.
+4. **Live input review:** confirm media keys, adjoining-edge cursor return and
+   the per-controller pointer speed on both iMacs (implemented in 0.1.14).
 5. **Resume interrupted transfers.** A dropped connection means sending again.
-6. After iMac 1 moves to Debian: test Linux to Linux control and files, then
-   consider a dedicated file lane over the direct cable or Thunderbolt.
+6. Measure Linux-to-Linux file throughput and cable-removal fallback. Direct
+   Ethernet is established; Thunderbolt hardware is not currently detected
+   on iMac1.
 
 ## Waiting on other apps
 

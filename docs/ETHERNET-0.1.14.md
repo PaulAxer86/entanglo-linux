@@ -85,3 +85,26 @@ changes. Physical media keys, cursor return and mouse speed need live review.
   changed no dependency versions; only workspace version fields changed.
 - Website: `npm ci --no-audit --no-fund`, then `npm run build` passed (six pages).
 - `git diff --check` and Python release-script syntax validation passed.
+
+## Publication and installation evidence
+
+- GitHub release: https://github.com/PaulAxer86/entanglo-linux/releases/tag/v0.1.14
+- Source: `96e9a9f0dfbdef41695795970da98bf627eda251`; both PR and main
+  Debian 12 Actions builds passed. Website commit: `396974b`.
+- Official package: 2,744,256 bytes; SHA-256
+  `18f36b59ece3511168a53a7ef2252a5791dda1427df7d6c5e242005296707a0e`.
+- Executable on both iMacs: SHA-256
+  `fd22f56e92e262581e8c42314e471ddffc9e5f0ffa8fa09a650b9c5e0fc80e73`.
+- Both hello messages report 0.1.14. Established TCP traffic uses the direct
+  Ethernet link; identities and saved trust survived both restarts.
+- The live HTTPS manifest and download page return HTTP 200. Manifest content
+  exactly matches the verified release; Cloudflare Pages reports success.
+- Installation is per-user, with a desktop launcher override. System 0.1.13
+  stays in place for rollback. Existing iMac2 autostart uses the personal path.
+- User settings: iMac1 pointer multiplier 2.0; iMac2 default 1.0.
+- Physical media-key and pointer feel acceptance is pending user feedback.
+  Cable-removal fallback has policy tests, but no live disconnection test.
+- iMac1 has no detected backlight device/KDE brightness display. iMac2 has
+  `nv_backlight`. No unsupported firmware/driver change was attempted.
+
+This documentation-only receipt does not change the tested release sources.
