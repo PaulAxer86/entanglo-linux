@@ -1,5 +1,6 @@
 pub mod coordinator;
 pub mod discovery;
+pub mod path;
 pub mod session;
 pub mod transport;
 pub mod trust_store;

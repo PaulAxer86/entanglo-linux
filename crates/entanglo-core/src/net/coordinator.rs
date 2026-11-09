@@ -186,6 +186,7 @@ fn peer_screen_size(hello: &HelloPayload) -> Option<(f64, f64)> {
 pub enum CoordinatorEvent {
     PeerDiscovered(super::discovery::DiscoveredPeer),
     PeerDiscoveryRemoved(String),
+    PeerDiscoveryEndpointRemoved(super::discovery::DiscoveryEvent),
     PeerConnected {
         conn_id: ConnId,
         direction: Direction,
@@ -259,6 +260,8 @@ struct PeerHandle {
     device_id: Option<String>,
     screen_size: Option<(f64, f64)>,
     is_linux: bool,
+    local_addr: Option<SocketAddr>,
+    expected_device_id: Option<String>,
 }
 
 pub struct Coordinator {
@@ -283,6 +286,8 @@ pub struct Coordinator {
     /// an assigned screen edge; the manual Control button has no known
     /// geometric entry edge and still relies on Emergency Stop.
     remote_cursor: std::sync::Mutex<Option<RemoteCursorState>>,
+    pointer_return: std::sync::Mutex<Option<(RemoteEntryEdge, f64)>>,
+    remote_pointer_speed: AtomicU64,
     /// `Some` once `enable_receiver` has successfully opened
     /// `/dev/uinput` — every trusted peer's `InputEvent`s are then
     /// injected through it. `None` (the default) means this device
@@ -318,6 +323,7 @@ pub struct Coordinator {
     /// controllers.
     being_controlled_by: Mutex<Option<ConnId>>,
     preferred_controller: std::sync::Mutex<Option<String>>,
+    discovery_connect: Mutex<()>,
     discovery_attempts: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     pending_file_acks: std::sync::Mutex<HashMap<String, oneshot::Sender<FileAckPayload>>>,
 }
@@ -343,6 +349,8 @@ impl Coordinator {
             events_tx,
             active_receiver: std::sync::Mutex::new(None),
             remote_cursor: std::sync::Mutex::new(None),
+            pointer_return: std::sync::Mutex::new(None),
+            remote_pointer_speed: AtomicU64::new(saved_pointer_speed().to_bits()),
             injector: Mutex::new(None),
             receiver_enabled_flag: std::sync::atomic::AtomicBool::new(false),
             controller_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -350,6 +358,7 @@ impl Coordinator {
             emergency_stopped: std::sync::atomic::AtomicBool::new(false),
             being_controlled_by: Mutex::new(None),
             preferred_controller: std::sync::Mutex::new(super::trust_store::preferred_controller()),
+            discovery_connect: Mutex::new(()),
             discovery_attempts: Mutex::new(std::collections::HashMap::new()),
             pending_file_acks: std::sync::Mutex::new(HashMap::new()),
         });
@@ -477,6 +486,10 @@ impl Coordinator {
     }
 
     async fn spawn_peer(self: Arc<Self>, socket: TcpStream, direction: Direction) {
+        self.spawn_identified_candidate(socket, direction, None).await;
+    }
+
+    async fn spawn_identified_candidate(self: Arc<Self>, socket: TcpStream, direction: Direction, expected_device_id: Option<String>) {
         tracing::info!(?direction, peer = ?socket.peer_addr().ok(), local = ?socket.local_addr().ok(), "peer transport connected");
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
@@ -489,6 +502,8 @@ impl Coordinator {
                 device_id: None,
                 screen_size: None,
                 is_linux: false,
+                local_addr: socket.local_addr().ok(),
+                expected_device_id,
             },
         );
         let _ = self
@@ -581,6 +596,32 @@ impl Coordinator {
                 if let Some(device_id) = identified_device_id {
                     if let Some(handle) = this.peers.lock().await.get_mut(&conn_id) {
                         handle.device_id = Some(device_id);
+                    }
+                }
+                if let SessionEvent::Trusted { ref device_id } = event {
+                    let peers = this.peers.lock().await;
+                    if let Some(current) = peers.get(&conn_id) {
+                        let priority = super::path::address_priority(current.local_addr.map(|addr| addr.ip()));
+                        let old_paths: Vec<_> = peers.iter().filter(|(id, peer)| **id != conn_id
+                            && peer.device_id.as_ref() == Some(device_id)
+                            && super::path::address_priority(peer.local_addr.map(|addr| addr.ip())) > priority)
+                            .map(|(id, peer)| (*id, peer.outgoing_tx.clone())).collect();
+                        drop(peers);
+                        for (old_id, sender) in old_paths {
+                            {
+                                let mut active = this.active_receiver.lock().unwrap();
+                                if *active == Some(old_id) {
+                                    *active = None;
+                                    *this.remote_cursor.lock().unwrap() = None;
+                                }
+                            }
+                            let mut holder = this.being_controlled_by.lock().await;
+                            if *holder == Some(old_id) { *holder = None; }
+                            drop(holder);
+                            let _ = sender.send(OutgoingMessage::ReleaseControl(ReleaseControlPayload {
+                                reason: "A faster network path is available".into(),
+                            }));
+                        }
                     }
                 }
                 if let SessionEvent::PeerHello { ref hello, .. } = event {
@@ -678,10 +719,16 @@ impl Coordinator {
             return;
         };
         let peers = self.peers.lock().await;
+        let mut selected: HashMap<&str, (&PeerHandle, u8)> = HashMap::new();
         for handle in peers.values() {
-            let _ = handle
-                .outgoing_tx
-                .send(OutgoingMessage::ClipboardText(payload.clone()));
+            let Some(id) = handle.device_id.as_deref() else { continue; };
+            let priority = super::path::address_priority(handle.local_addr.map(|addr| addr.ip()));
+            if selected.get(id).is_none_or(|(_, current)| priority < *current) {
+                selected.insert(id, (handle, priority));
+            }
+        }
+        for (handle, _) in selected.values() {
+            let _ = handle.outgoing_tx.send(OutgoingMessage::ClipboardText(payload.clone()));
         }
     }
 
@@ -805,6 +852,7 @@ impl Coordinator {
     /// `ROADMAP.md` Phase 1; today the only caller is the Devices
     /// page's manual "Control this device" button.
     pub async fn set_active_receiver(&self, conn_id: Option<ConnId>) {
+        *self.pointer_return.lock().unwrap() = None;
         *self.active_receiver.lock().unwrap() = conn_id;
         *self.remote_cursor.lock().unwrap() = None;
     }
@@ -852,21 +900,62 @@ impl Coordinator {
         let event = match event {
             super::discovery::DiscoveryEvent::Resolved(peer) => CoordinatorEvent::PeerDiscovered(peer),
             super::discovery::DiscoveryEvent::Removed(name) => CoordinatorEvent::PeerDiscoveryRemoved(name),
+            event @ super::discovery::DiscoveryEvent::RemovedOnInterface { .. } => CoordinatorEvent::PeerDiscoveryEndpointRemoved(event),
         };
         let _ = self.events_tx.send(event);
     }
 
     pub async fn connect_discovered(self: &Arc<Self>, peer: &super::discovery::DiscoveredPeer) -> std::io::Result<()> {
-        let Some(id) = peer.device_id.as_deref() else { return Ok(()); };
-        if !self.should_connect_discovered(id).await { return Ok(()); }
-        let Some(endpoint)=peer.endpoint() else {return Ok(());};
-        let key=format!("{id}@{endpoint}");
+        self.connect_candidate(peer, false).await
+    }
+
+    pub async fn connect_first_contact(self: &Arc<Self>, peer: &super::discovery::DiscoveredPeer) -> std::io::Result<()> {
+        self.connect_candidate(peer, true).await
+    }
+
+    async fn connect_candidate(self: &Arc<Self>, peer: &super::discovery::DiscoveredPeer, allow_untrusted: bool) -> std::io::Result<()> {
+        // Serialize discovery dialing so simultaneous IPv4/IPv6 announcements
+        // cannot each open a socket before the first hello has arrived.
+        let _connecting = self.discovery_connect.lock().await;
+        let id = match peer.device_id.as_deref() {
+            Some(id) => id,
+            None if allow_untrusted => &peer.device_name,
+            None => return Ok(()),
+        };
+        if id == self.local_device_id { return Ok(()); }
+        let trusted = self.trust_store.lock().await.is_trusted(id);
+        if !trusted && !allow_untrusted { return Ok(()); }
+        let priority = peer.priority();
+        {
+            let peers = self.peers.lock().await;
+            let existing = peers.values().filter(|handle| handle.device_id.as_deref()
+                .or(handle.expected_device_id.as_deref()) == Some(id));
+            if existing.into_iter().any(|handle| path_blocks_candidate(trusted, priority,
+                super::path::address_priority(handle.local_addr.map(|addr| addr.ip())))) {
+                return Ok(());
+            }
+        }
+        let Some(endpoint) = peer.endpoint() else { return Ok(()); };
+        let key = format!("{id}@{endpoint}");
         {
             let mut attempts = self.discovery_attempts.lock().await;
             if attempts.get(&key).is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(5)) { return Ok(()); }
             attempts.insert(key, std::time::Instant::now());
         }
-        self.dial(endpoint).await?;
+        let socket = if let Some(interface) = peer.interface.as_deref() {
+            let source = super::path::source_address(interface, endpoint.ip())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Bonjour interface has no matching local address"))?;
+            let socket = if endpoint.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+            let source = match (source, endpoint) {
+                (std::net::IpAddr::V6(ip), SocketAddr::V6(target)) if ip.is_unicast_link_local() =>
+                    SocketAddr::V6(std::net::SocketAddrV6::new(ip, 0, 0, target.scope_id())),
+                (ip, _) => SocketAddr::new(ip, 0),
+            };
+            socket.bind(source)?;
+            socket.connect(endpoint).await?
+        } else { TcpStream::connect(endpoint).await? };
+        tracing::info!(device_id = id, interface = ?peer.interface, %endpoint, "connecting discovered peer on selected interface");
+        Arc::clone(self).spawn_identified_candidate(socket, Direction::Outbound, Some(id.to_owned())).await;
         Ok(())
     }
 
@@ -895,6 +984,22 @@ impl Coordinator {
     /// Forwards one input event to whichever peer `set_active_receiver`
     /// last selected, if any. No-op if nothing is currently targeted,
     /// or while `emergency_stop` is active.
+    pub fn remote_pointer_speed(&self) -> f64 {
+        f64::from_bits(self.remote_pointer_speed.load(Ordering::Relaxed))
+    }
+
+    pub fn set_remote_pointer_speed(&self, speed: f64) -> std::io::Result<()> {
+        let speed = valid_pointer_speed(speed);
+        super::trust_store::write_setting("remote_pointer_speed", &speed.to_string())?;
+        self.remote_pointer_speed.store(speed.to_bits(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Consumed by the desktop thread before revealing the local pointer.
+    pub fn take_pointer_return(&self) -> Option<(RemoteEntryEdge, f64)> {
+        self.pointer_return.lock().unwrap().take()
+    }
+
     pub async fn send_to_active_receiver(&self, mut event: InputEventMessage) {
         if self
             .emergency_stopped
@@ -909,12 +1014,19 @@ impl Coordinator {
         // holding a `!Send` std MutexGuard across an await point.
         let target = *self.active_receiver.lock().unwrap();
         if let Some(conn_id) = target {
+            scale_pointer_motion(&mut event, self.remote_pointer_speed());
             let returned_local = {
                 let mut cursor = self.remote_cursor.lock().unwrap();
-                cursor
-                    .as_mut()
-                    .filter(|state| state.conn_id == conn_id)
-                    .is_some_and(|state| state.observe(&mut event))
+                if let Some(state) = cursor.as_mut().filter(|state| state.conn_id == conn_id) {
+                    if state.observe(&mut event) {
+                        let fraction = match state.entry_edge {
+                            RemoteEntryEdge::Left | RemoteEntryEdge::Right => state.y / (state.screen_height - 1.0).max(1.0),
+                            RemoteEntryEdge::Top | RemoteEntryEdge::Bottom => state.x / (state.screen_width - 1.0).max(1.0),
+                        };
+                        *self.pointer_return.lock().unwrap() = Some((state.entry_edge, fraction.clamp(0.0, 1.0)));
+                        true
+                    } else { false }
+                } else { false }
             };
             if returned_local {
                 *self.active_receiver.lock().unwrap() = None;
@@ -1006,6 +1118,27 @@ fn translate(conn_id: ConnId, event: SessionEvent) -> CoordinatorEvent {
     }
 }
 
+fn valid_pointer_speed(speed: f64) -> f64 {
+    if speed.is_finite() { speed.clamp(0.25, 4.0) } else { 1.0 }
+}
+
+fn saved_pointer_speed() -> f64 {
+    valid_pointer_speed(super::trust_store::read_setting("remote_pointer_speed")
+        .and_then(|value| value.parse().ok()).unwrap_or(1.0))
+}
+
+fn scale_pointer_motion(event: &mut InputEventMessage, speed: f64) {
+    if event.kind == crate::protocol::payloads::input_event::InputEventKind::MouseMove {
+        event.delta_x = event.delta_x.map(|delta| delta * valid_pointer_speed(speed));
+        event.delta_y = event.delta_y.map(|delta| delta * valid_pointer_speed(speed));
+    }
+}
+
+/// Keep an established path unless a trusted device has a better one.
+fn path_blocks_candidate(trusted: bool, candidate: u8, existing: u8) -> bool {
+    !trusted || existing <= candidate
+}
+
 fn reconnect_required(preferred: Option<&str>, connected: &std::collections::HashSet<String>, trusted: &std::collections::HashSet<String>) -> bool {
     if connected.is_empty() { return true; }
     if let Some(preferred)=preferred.filter(|id|trusted.contains(*id)) {
@@ -1031,6 +1164,47 @@ mod tests {
     use super::*;
     use crate::protocol::payloads::input_event::InputEventKind;
     use std::time::Duration;
+
+    #[test]
+    fn pointer_speed_changes_only_remote_motion_and_rejects_invalid_settings() {
+        let mut event = sample_delta_event(3.0, -2.0);
+        scale_pointer_motion(&mut event, 2.0);
+        assert_eq!((event.delta_x, event.delta_y), (Some(6.0), Some(-4.0)));
+        let mut scroll = sample_delta_event(1.0, 10.0);
+        scroll.kind = InputEventKind::Scroll;
+        scale_pointer_motion(&mut scroll, 2.0);
+        assert_eq!(scroll.delta_y, Some(10.0), "pointer speed must not accelerate scrolling");
+        assert_eq!(valid_pointer_speed(f64::NAN), 1.0);
+        assert_eq!(valid_pointer_speed(100.0), 4.0);
+        assert_eq!(valid_pointer_speed(0.0), 0.25);
+    }
+
+    #[test]
+    fn wired_upgrade_preserves_fallback_and_never_downgrades() {
+        assert!(!path_blocks_candidate(true, 0, 1), "trusted Wi-Fi peer can gain an Ethernet path");
+        assert!(path_blocks_candidate(true, 1, 0), "later Wi-Fi announcements must not displace Ethernet");
+        assert!(path_blocks_candidate(true, 0, 0), "IPv4/IPv6 announcements must not duplicate a wired session");
+        assert!(path_blocks_candidate(false, 0, 1), "discovery must not bypass trust during an upgrade");
+        assert!(!path_blocks_candidate(true, 1, 2), "a known path can replace an unclassified path");
+    }
+
+    #[tokio::test]
+    async fn discovery_dials_the_announced_interface_without_duplicate_sockets() {
+        let (coordinator, _events) = Coordinator::new("local-discovery-test".into(), hello("Local"),
+            Arc::new(Mutex::new(TrustStore::empty_for_test())));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = super::super::discovery::DiscoveredPeer {
+            device_name: "Peer._entanglo._tcp.local.".into(), host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(), addresses: vec!["127.0.0.1".parse().unwrap()],
+            device_id: Some("remote-discovery-test".into()), interface: Some("lo".into()),
+        };
+        coordinator.connect_first_contact(&peer).await.unwrap();
+        let (_socket, address) = listener.accept().await.unwrap();
+        assert_eq!(address.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        coordinator.connect_first_contact(&peer).await.unwrap();
+        assert_eq!(coordinator.peers.lock().await.len(), 1, "pending hello must also suppress duplicate dialing");
+        assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+    }
 
     #[test]
     fn a_connected_receiver_does_not_hide_a_missing_controller() {
@@ -1228,7 +1402,7 @@ mod tests {
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
         coordinator.peers.lock().await.insert(
             42,
-            PeerHandle { outgoing_tx, device_id: Some("peer".into()), screen_size: None, is_linux: false },
+            PeerHandle { outgoing_tx, device_id: Some("peer".into()), screen_size: None, is_linux: false, local_addr: None, expected_device_id: None },
         );
         (coordinator, events, outgoing_rx)
     }
@@ -1394,6 +1568,8 @@ mod tests {
                 device_id: Some("wide-peer".into()),
                 screen_size: Some((5120.0, 2880.0)),
                 is_linux: false,
+                local_addr: None,
+                expected_device_id: None,
             },
         );
 
@@ -1422,6 +1598,10 @@ mod tests {
             .send_to_active_receiver(sample_delta_event(1.0, 0.0))
             .await;
         assert_eq!(coordinator.active_receiver().await, None);
+        let (edge, fraction) = coordinator.take_pointer_return().expect("local cursor return");
+        assert_eq!(edge, RemoteEntryEdge::Right);
+        assert!((0.49..0.51).contains(&fraction));
+        assert!(coordinator.take_pointer_return().is_none(), "cursor return is consumed once");
     }
 
     /// Two full `Coordinator`s — one listening, one dialing — dialed,

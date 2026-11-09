@@ -1,6 +1,15 @@
 # Handover — Entanglo for Linux
 
-Last updated 2026-11-08. Read this first; `docs/DEV.md` holds the older history.
+Last updated 2026-11-09. Read this first; `docs/DEV.md` holds the older history.
+
+## 0.1.14 release work — LINUX-ETHERNET-001
+
+Direct Ethernet selection, media keys, cursor return and adjustable remote
+pointer speed are implemented;
+see [the task, validation and rollback](docs/ETHERNET-0.1.14.md). Release
+publication and live two-peer acceptance must be verified before marking
+this rollout complete. No Thunderbolt interface is currently detected on
+iMac1. Both iMacs now run Debian 13.
 
 ## Current state
 

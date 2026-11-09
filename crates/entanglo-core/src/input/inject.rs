@@ -48,6 +48,7 @@ pub struct InputInjectionService {
     device: VirtualDevice,
     modifiers: ModifierState,
     absolute_pointer: Option<AbsolutePointer>,
+    pressed_media: std::collections::HashSet<u16>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +71,9 @@ impl InputInjectionService {
     pub fn open() -> Result<Self, InjectionError> {
         let mut keys = AttributeSet::<Key>::new();
         for (_, linux_code) in keymap::MAC_TO_LINUX {
+            keys.insert(Key::new(*linux_code));
+        }
+        for (_, linux_code) in keymap::MEDIA_TO_LINUX {
             keys.insert(Key::new(*linux_code));
         }
         for (_, btn_code) in keymap::MOUSE_BUTTON_TO_LINUX {
@@ -100,6 +104,7 @@ impl InputInjectionService {
             device,
             modifiers: ModifierState::default(),
             absolute_pointer,
+            pressed_media: std::collections::HashSet::new(),
         })
     }
 
@@ -165,8 +170,17 @@ impl InputInjectionService {
                 self.write_key(linux_code, event.kind == InputEventKind::KeyDown)?;
             }
             InputEventKind::MediaKey => {
-                // Deferred to Phase 2 alongside the rest of the media
-                // key surface — see ROADMAP.md.
+                if let (Some(media_key), Some(pressed)) = (event.media_key, event.pressed) {
+                    if let Some((_, code)) = keymap::MEDIA_TO_LINUX.iter().find(|(key, _)| *key == media_key) {
+                        let value = if pressed {
+                            if self.pressed_media.insert(*code) { 1 } else { 2 }
+                        } else {
+                            self.pressed_media.remove(code);
+                            0
+                        };
+                        self.device.emit(&[InputEvent::new(EventType::KEY, *code, value)])?;
+                    }
+                }
             }
         }
         Ok(())
