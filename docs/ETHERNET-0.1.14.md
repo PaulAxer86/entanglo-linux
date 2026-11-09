@@ -103,8 +103,31 @@ changes. Physical media keys, cursor return and mouse speed need live review.
   stays in place for rollback. Existing iMac2 autostart uses the personal path.
 - User settings: iMac1 pointer multiplier 2.0; iMac2 default 1.0.
 - Physical media-key and pointer feel acceptance is pending user feedback.
-  Cable-removal fallback has policy tests, but no live disconnection test.
+  Ethernet interruption and recovery were subsequently verified live below.
 - iMac1 has no detected backlight device/KDE brightness display. iMac2 has
   `nv_backlight`. No unsupported firmware/driver change was attempted.
 
 This documentation-only receipt does not change the tested release sources.
+
+## Live fallback acceptance — 2026-11-09, 20:48 UTC
+
+The official 0.1.14 executables were running on both iMacs. Both working trees
+were clean and the public manifest still reported 0.1.14 before the test.
+
+1. Confirmed Entanglo TCP port 55555 was reachable through both existing
+   Ethernet and Wi-Fi addresses.
+2. Disabled `enp2s0` with `nmcli device disconnect enp2s0` for 12 seconds,
+   sampling live TCP sessions at four-second intervals. A `finally` block
+   restored `iMac Direct Ethernet` with `nmcli connection up`.
+3. Every disabled-link sample showed an established Wi-Fi Entanglo session.
+   The coordinator retained trusted identity and cleaned up the former
+   Ethernet session after heartbeat timeout.
+4. Restoration succeeded. The peer automatically opened a scoped link-local
+   IPv6 session on `enp2s0`; hello confirmed version 0.1.14 and trusted state.
+   The Wi-Fi connection remained available as designed. Wired connections
+   rank ahead of Wi-Fi for subsequent input, files and clipboard selection.
+
+Evidence: the local session log and
+`~/Documents/entanglo-0.1.14-rollback/failover-test.json`. No executable,
+version, manifest or website change was required. Human assessment of media
+keys and pointer feel remains distinct from this network acceptance test.

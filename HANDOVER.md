@@ -19,6 +19,9 @@ iMac1. Both iMacs now run Debian 13.
   iMac2's existing autostart was updated too. System 0.1.13 remains available
   for rollback. Device identity, trust and edge assignments were retained.
 - Live: both peers report 0.1.14; the TCP session uses direct Ethernet.
+- Follow-up acceptance: disabling Ethernet for 12 seconds produced a trusted
+  Wi-Fi session; restoring the profile automatically established scoped IPv6
+  Ethernet again. The existing Wi-Fi socket remains available as fallback.
   iMac1 remote pointer speed is 2.0; iMac2 keeps the default 1.0.
 - Release/website CI and all 116 workspace tests passed. The live manifest
   exactly matches the verified release, and the download page serves 0.1.14.
@@ -57,9 +60,9 @@ The two iMacs also have a direct cable, using link-local addressing.
 4. **Live input review:** confirm media keys, adjoining-edge cursor return and
    the per-controller pointer speed on both iMacs (implemented in 0.1.14).
 5. **Resume interrupted transfers.** A dropped connection means sending again.
-6. Measure Linux-to-Linux file throughput and cable-removal fallback. Direct
-   Ethernet is established; Thunderbolt hardware is not currently detected
-   on iMac1.
+6. Measure Linux-to-Linux file throughput. Ethernet interruption/fallback and
+   automatic wired recovery were verified live on 2026-11-09. Thunderbolt
+   hardware is not currently detected on iMac1.
 
 ## Waiting on other apps
 
