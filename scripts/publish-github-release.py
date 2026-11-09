@@ -29,12 +29,15 @@ except urllib.error.HTTPError as error:
 package = root / f'dist/entanglo-linux_{version}_amd64.deb'
 manifest = {
     'version': version, 'date': datetime.date.today().isoformat(),
-    'title': f'Linux {version}: direct Ethernet, media keys and improved pointer control',
+    'title': f'Linux {version}: keep the local pointer still during remote control',
     'url': f'https://github.com/{repository}/releases/download/v{version}/{package.name}',
     'sha256': hashlib.sha256(package.read_bytes()).hexdigest(), 'size': package.stat().st_size,
     'minimumSystemVersion': 'Debian 12', 'architecture': 'amd64',
     'sourceCommit': os.environ['RELEASE_SHA'],
-    'highlights': ['Automatically prefer a reachable Ethernet path for trusted peers, with Wi-Fi fallback.',
+    'highlights': ['Confine and hide the local cursor while controlling another screen.',
+                   'Forward physical input only after X11 confirms pointer and keyboard capture.',
+                   'Release confinement on return, emergency stop and application exit.',
+                   'Automatically prefer a reachable Ethernet path for trusted peers, with Wi-Fi fallback.',
                    'Keep each Bonjour interface and address, including scoped link-local IPv6.',
                    'Use the selected connection for input, files and clipboard; show its actual interface.',
                    'Forward volume, brightness and playback keys; return the pointer at the adjoining edge.',

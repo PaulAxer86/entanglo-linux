@@ -19,15 +19,15 @@
 //! cursor to an assigned edge correctly started forwarding input to
 //! the peer (Android), but the local cursor kept visibly moving too,
 //! since capture reads raw evdev independently of whatever X11 does
-//! with the same physical mouse. `grab_pointer` + an invisible cursor
-//! fixes that.
+//! with the same physical mouse. Successful pointer capture confines the
+//! local cursor to an InputOnly window and hides it until control returns.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode, GrabStatus};
+use x11rb::protocol::xproto::{ConnectionExt, ConfigureWindowAux, CreateGCAux, CreateWindowAux, EventMask, GrabMode, GrabStatus, Rectangle, WindowClass};
 use x11rb::rust_connection::RustConnection;
 
 use entanglo_core::net::{ConnId, RemoteEntryEdge};
@@ -109,6 +109,8 @@ pub struct EdgeWatcher {
     /// every grab — X11 cursors are cheap server-side resources, no
     /// need to recreate per grab/ungrab cycle.
     invisible_cursor: u32,
+    confinement_window: u32,
+    saved_pointer: Option<(i16, i16)>,
     /// Whether we currently hold the pointer grab — tracked locally
     /// so the poll loop only calls `grab`/`ungrab` on an actual
     /// transition, not every tick.
@@ -141,6 +143,14 @@ impl EdgeWatcher {
             }
         };
 
+        // InputOnly windows have no pixels. A mapped 1x1 window confines
+        // the core pointer while raw evdev motion continues to reach capture.
+        let confinement_window = conn.generate_id().ok()?;
+        conn.create_window(0, confinement_window, root, (screen.width_in_pixels / 2) as i16,
+            (screen.height_in_pixels / 2) as i16, 1, 1, 0,
+            WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new().override_redirect(1))
+            .ok()?.check().ok()?;
+
         Some(Self {
             root,
             screen_width: screen.width_in_pixels as i16,
@@ -148,6 +158,8 @@ impl EdgeWatcher {
             conn,
             was_at_edge: None,
             invisible_cursor,
+            confinement_window,
+            saved_pointer: None,
             grabbed: false,
             keyboard_grabbed: false,
         })
@@ -163,6 +175,11 @@ impl EdgeWatcher {
     ) -> Result<u32, Box<dyn std::error::Error>> {
         let pixmap = conn.generate_id()?;
         conn.create_pixmap(1, pixmap, root, 1, 1)?.check()?;
+        // X11 pixmap contents are undefined on creation: clear the mask.
+        let gc = conn.generate_id()?;
+        conn.create_gc(gc, pixmap, &CreateGCAux::new().foreground(0))?.check()?;
+        conn.poly_fill_rectangle(pixmap, gc, &[Rectangle { x: 0, y: 0, width: 1, height: 1 }])?.check()?;
+        conn.free_gc(gc)?.check()?;
         let cursor = conn.generate_id()?;
         conn.create_cursor(cursor, pixmap, pixmap, 0, 0, 0, 0, 0, 0, 0, 0)?
             .check()?;
@@ -173,6 +190,7 @@ impl EdgeWatcher {
     }
 
     fn restore_pointer(&mut self, edge: RemoteEntryEdge, fraction: f64) {
+        self.ungrab();
         if let Ok(cookie) = self.conn.get_geometry(self.root) {
             if let Ok(geometry) = cookie.reply() {
                 self.screen_width = geometry.width as i16;
@@ -201,19 +219,12 @@ impl EdgeWatcher {
         crossed
     }
 
-    /// Grabs the pointer with an invisible cursor and no window
-    /// confinement — the physical cursor position still moves (we
-    /// read it via raw evdev regardless, unaffected by any of this),
-    /// but it's no longer *visible*, and local apps stop receiving
-    /// its clicks/motion while a peer is being controlled, matching
-    /// what a KVM switch is expected to feel like. Idempotent.
-    pub fn grab(&mut self) {
-        if !self.grabbed {
-            self.grab_local_pointer();
-        }
-        if !self.keyboard_grabbed {
-            self.grab_local_keyboard();
-        }
+    /// Confine and hide the local pointer before forwarding raw input.
+    /// Never report readiness when X11 denied either grab.
+    pub fn grab(&mut self) -> bool {
+        if !self.grabbed { self.grab_local_pointer(); }
+        if self.grabbed && !self.keyboard_grabbed { self.grab_local_keyboard(); }
+        self.grabbed && self.keyboard_grabbed
     }
 
     /// Without this, keys typed for the peer also reach the focused local
@@ -232,6 +243,20 @@ impl EdgeWatcher {
     }
 
     fn grab_local_pointer(&mut self) {
+        if let Ok(cookie) = self.conn.get_geometry(self.root) {
+            if let Ok(geometry) = cookie.reply() {
+                self.screen_width = geometry.width as i16;
+                self.screen_height = geometry.height as i16;
+                let _ = self.conn.configure_window(self.confinement_window,
+                    &ConfigureWindowAux::new().x(i32::from(geometry.width / 2)).y(i32::from(geometry.height / 2)));
+            }
+        }
+        self.saved_pointer = self.conn.query_pointer(self.root).ok()
+            .and_then(|cookie| cookie.reply().ok()).map(|pointer| (pointer.root_x, pointer.root_y));
+        if self.conn.map_window(self.confinement_window).ok().and_then(|cookie| cookie.check().ok()).is_none() {
+            tracing::warn!("could not map pointer confinement window");
+            return;
+        }
         let event_mask = EventMask::POINTER_MOTION
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
@@ -242,7 +267,7 @@ impl EdgeWatcher {
             event_mask,
             GrabMode::ASYNC,
             GrabMode::ASYNC,
-            x11rb::NONE, // no confine_to — see module doc comment
+            self.confinement_window,
             self.invisible_cursor,
             x11rb::CURRENT_TIME,
         ) {
@@ -253,11 +278,20 @@ impl EdgeWatcher {
             }
         };
         match cookie.reply() {
-            Ok(_reply) => {
+            Ok(reply) if pointer_grab_succeeded(reply.status) => {
                 self.grabbed = true;
-                tracing::info!("pointer grabbed (local cursor hidden while controlling a peer)");
+                tracing::info!("pointer captured: local cursor hidden and confined while controlling a peer");
             }
-            Err(e) => tracing::warn!(error = %e, "XGrabPointer failed"),
+            Ok(reply) => {
+                let _ = self.conn.unmap_window(self.confinement_window);
+                let _ = self.conn.flush();
+                tracing::debug!(status = ?reply.status, "X11 denied pointer capture; remote input remains paused");
+            }
+            Err(e) => {
+                let _ = self.conn.unmap_window(self.confinement_window);
+                let _ = self.conn.flush();
+                tracing::warn!(error = %e, "XGrabPointer failed");
+            }
         }
     }
 
@@ -287,9 +321,19 @@ impl EdgeWatcher {
             Err(e) => tracing::warn!(error = %e, "XUngrabPointer request failed to send"),
         }
         self.grabbed = false;
+        let _ = self.conn.unmap_window(self.confinement_window);
+        if let Some((x, y)) = self.saved_pointer.take() {
+            let x = x.clamp(2, (self.screen_width - 3).max(2));
+            let y = y.clamp(2, (self.screen_height - 3).max(2));
+            let _ = self.conn.warp_pointer(x11rb::NONE, self.root, 0, 0, 0, 0, x, y);
+        }
+        let _ = self.conn.flush();
+        self.was_at_edge = None;
         tracing::info!("pointer released (local cursor visible again)");
     }
 }
+
+fn pointer_grab_succeeded(status: GrabStatus) -> bool { status == GrabStatus::SUCCESS }
 
 /// Return just inside the controller's adjoining edge. Preserve the
 /// normalized position along that edge across different screen sizes.
@@ -348,15 +392,20 @@ pub fn start(shared: &Rc<AppShared>) {
         if let Some((edge, fraction)) = shared.backend.coordinator.take_pointer_return() {
             watcher.restore_pointer(edge, fraction);
         }
+        let mut activation_started = false;
         if let Some(edge) = watcher.poll() {
-            // The hidden X11 cursor is still free to move while raw
-            // evdev events control the peer. It can therefore leave and
-            // re-enter the local edge during one remote-control session.
-            // Re-activating here would reseed the virtual remote cursor
-            // on every such crossing, visibly pinning it to that edge.
+            // A confined pointer may appear at a local edge. It must not
+            // reseed the remote virtual cursor during an active session.
             if should_activate_edge(shared.backend.coordinator.active_receiver_sync()) {
                 if let Some(conn_id) = shared.conn_id_for_edge(edge) {
-                    activate(&shared, conn_id, edge);
+                    if !shared.backend.coordinator.is_emergency_stopped() {
+                        let ready = watcher.grab();
+                        shared.backend.coordinator.set_controller_capture_ready(ready);
+                        if ready {
+                            activation_started = true;
+                            activate(&shared, conn_id, edge);
+                        }
+                    }
                 }
             }
         }
@@ -378,10 +427,11 @@ pub fn start(shared: &Rc<AppShared>) {
         let should_grab = should_grab_pointer(
             shared.backend.coordinator.is_emergency_stopped(),
             shared.backend.coordinator.active_receiver_sync(),
-        );
+        ) || activation_started;
         if should_grab {
-            watcher.grab();
+            shared.backend.coordinator.set_controller_capture_ready(watcher.grab());
         } else {
+            shared.backend.coordinator.set_controller_capture_ready(false);
             watcher.ungrab();
         }
         glib::ControlFlow::Continue
@@ -396,8 +446,7 @@ fn should_grab_pointer(emergency_stopped: bool, active_receiver: Option<ConnId>)
 }
 
 /// An edge crossing starts a session only while control is local. The
-/// X11 pointer keeps moving invisibly during remote control, so its later
-/// crossings must not reset the already-active remote virtual cursor.
+/// confined X11 pointer must not reset the already-active remote cursor.
 fn should_activate_edge(active_receiver: Option<ConnId>) -> bool {
     active_receiver.is_none()
 }
@@ -420,6 +469,55 @@ fn activate(shared: &Rc<AppShared>, conn_id: ConnId, local_edge: ScreenEdge) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated X11 server and ENTANGLO_X11_TEST=1"]
+    fn isolated_x11_capture_confines_retries_and_restores_the_pointer() {
+        assert_eq!(std::env::var("ENTANGLO_X11_TEST").as_deref(), Ok("1"));
+        let mut watcher = EdgeWatcher::connect().expect("isolated X11 server");
+        let (control, screen) = RustConnection::connect(None).unwrap();
+        let root = control.setup().roots[screen].root;
+        let warp = |x, y| {
+            control.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, x, y).unwrap().check().unwrap();
+        };
+        let position = || {
+            let pointer = control.query_pointer(root).unwrap().reply().unwrap();
+            (pointer.root_x, pointer.root_y)
+        };
+        warp(400, 300);
+        let blocker = control.grab_pointer(false, root, EventMask::POINTER_MOTION,
+            GrabMode::ASYNC, GrabMode::ASYNC, x11rb::NONE, x11rb::NONE, x11rb::CURRENT_TIME)
+            .unwrap().reply().unwrap();
+        assert_eq!(blocker.status, GrabStatus::SUCCESS);
+        assert!(!watcher.grab(), "a competing X11 grab must pause forwarding");
+        assert!(!watcher.grabbed);
+        assert_eq!(position(), (400, 300));
+        control.ungrab_pointer(x11rb::CURRENT_TIME).unwrap().check().unwrap();
+        assert!(watcher.grab(), "retry must succeed after the competing grab ends");
+        let confined = position();
+        warp(900, 600);
+        assert_eq!(position(), confined, "local pointer must not track remote motion");
+        watcher.restore_pointer(RemoteEntryEdge::Left, 0.5);
+        assert!(!watcher.grabbed && !watcher.keyboard_grabbed);
+        assert_eq!(position(), return_position(RemoteEntryEdge::Left, 0.5, watcher.screen_width, watcher.screen_height));
+        warp(500, 400);
+        assert_eq!(position(), (500, 400), "local input must work after natural return");
+        assert!(watcher.grab());
+        watcher.ungrab();
+        assert_eq!(position(), (500, 400), "emergency release must restore the pre-grab position");
+        assert!(watcher.grab());
+        drop(watcher);
+        warp(700, 500);
+        assert_eq!(position(), (700, 500), "X11 connection loss must release confinement");
+    }
+
+    #[test]
+    fn denied_pointer_grabs_are_never_reported_as_success() {
+        assert!(pointer_grab_succeeded(GrabStatus::SUCCESS));
+        for status in [GrabStatus::ALREADY_GRABBED, GrabStatus::INVALID_TIME, GrabStatus::NOT_VIEWABLE, GrabStatus::FROZEN] {
+            assert!(!pointer_grab_succeeded(status));
+        }
+    }
 
     #[test]
     fn return_uses_the_adjoining_edge_instead_of_the_hidden_local_position() {

@@ -303,6 +303,7 @@ pub struct Coordinator {
     /// started reading local input devices. Doesn't mean any device
     /// was actually found — see `controller_device_count`.
     controller_enabled: std::sync::atomic::AtomicBool,
+    controller_capture_ready: std::sync::atomic::AtomicBool,
     controller_device_count: std::sync::atomic::AtomicUsize,
     /// The Input Sharing page's Emergency Stop, per `ROADMAP.md`
     /// Phase 1 ("matches the Mac's triple-Escape + explicit button").
@@ -354,6 +355,7 @@ impl Coordinator {
             injector: Mutex::new(None),
             receiver_enabled_flag: std::sync::atomic::AtomicBool::new(false),
             controller_enabled: std::sync::atomic::AtomicBool::new(false),
+            controller_capture_ready: std::sync::atomic::AtomicBool::new(false),
             controller_device_count: std::sync::atomic::AtomicUsize::new(0),
             emergency_stopped: std::sync::atomic::AtomicBool::new(false),
             being_controlled_by: Mutex::new(None),
@@ -444,7 +446,9 @@ impl Coordinator {
                             .await;
                     }
 
-                    this.send_to_active_receiver(input_event).await;
+                    if this.controller_capture_ready.load(Ordering::Relaxed) {
+                        this.send_to_active_receiver(input_event).await;
+                    }
                 }
             });
         }
@@ -975,6 +979,12 @@ impl Coordinator {
 
     pub fn receiving_controller_sync(&self) -> Option<ConnId> {
         self.being_controlled_by.try_lock().ok().and_then(|holder| *holder)
+    }
+
+    /// The X11 desktop sets this only after pointer and keyboard capture
+    /// have both succeeded. Emergency-stop detection remains active regardless.
+    pub fn set_controller_capture_ready(&self, ready: bool) {
+        self.controller_capture_ready.store(ready, Ordering::Relaxed);
     }
 
     pub fn active_receiver_sync(&self) -> Option<ConnId> {

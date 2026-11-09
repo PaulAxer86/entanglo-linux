@@ -2,12 +2,21 @@
 
 Last updated 2026-11-09. Read this first; `docs/DEV.md` holds the older history.
 
+## 0.1.16 pointer-capture fix in progress
+
+Task LINUX-POINTER-CAPTURE-001: X11 grab status was ignored and the local
+pointer was not confined. The fix requires successful mouse/keyboard grabs
+before forwarding raw input and confines the local pointer to an invisible
+InputOnly window. A real Xvfb test verifies denial/retry, immobility, return,
+emergency release and X11 connection loss. See `docs/POINTER-CAPTURE-0.1.16.md`.
+
 ## 0.1.15 update release — 2026-11-09
 
-Requested version bump so existing 0.1.14 installations receive an update
-through the website manifest. This release retains the 0.1.14 input and
-Ethernet fixes; no additional behavior change is claimed. Publication is
-pending the Debian 12 build, package verification and website deployment.
+Published the requested 0.1.15 update: Linux source `5df7df1`, website
+`4600199`. The public manifest was verified as 0.1.15. While the build was
+finishing, the user reported that the local pointer also moved during
+remote control. The immutable 0.1.15 release is retained; 0.1.16 fixes this
+newly reported issue.
 
 ## 0.1.14 deployed — 2026-11-09
 
