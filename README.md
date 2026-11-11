@@ -9,7 +9,7 @@ Tested live on Debian 13 with macOS Entanglo 0.1.60.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.16_amd64.deb
+sudo apt install ./entanglo-linux_0.1.17_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 
@@ -38,6 +38,10 @@ select this Linux device. Use an X11 desktop for Mac absolute pointer input.
 Receiving is the default. To control other devices from this computer, enable
 **Share my keyboard & mouse** in **Input Sharing** and restart the app; assign
 devices to any screen edge there (X11 only).
+While controlling another device, **Left Shift+Escape** or **Escape three
+times** brings the mouse and keyboard back; **Ctrl+Shift+Escape** is the
+emergency stop. Bluetooth mice and keyboards are picked up again after they
+reconnect.
 Printing and Wayland input reception are not yet implemented.
 
 ## Build and test

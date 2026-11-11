@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::features::clipboard::ClipboardSyncService;
 use crate::features::file_transfer::{outgoing_offer, FileProgress, TransferDirection, SEND_CHUNK_BYTES};
+use crate::input::escape::{EscapeCombo, EscapeDetector, EscapeKey};
 use crate::input::{InputCaptureService, InputInjectionService};
 use crate::protocol::payloads::{
     FileAckPayload, FileChunkPayload, HelloPayload, InputEventMessage, PairRequestPayload,
@@ -327,6 +328,14 @@ pub struct Coordinator {
     discovery_connect: Mutex<()>,
     discovery_attempts: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     pending_file_acks: std::sync::Mutex<HashMap<String, oneshot::Sender<FileAckPayload>>>,
+    /// When evdev capture last produced any event. The X11 desktop compares
+    /// this with clicks and key presses it receives during a pointer grab to
+    /// notice that capture has lost a device and must not keep the grab.
+    last_local_input: std::sync::Mutex<LocalInputTimes>,
+    /// When an escape combination last returned control. Both evdev and the
+    /// X11 grab see the same key press; the second one must not toggle
+    /// Emergency Stop after the first already released control.
+    last_escape_release: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Coordinator {
@@ -363,6 +372,8 @@ impl Coordinator {
             discovery_connect: Mutex::new(()),
             discovery_attempts: Mutex::new(std::collections::HashMap::new()),
             pending_file_acks: std::sync::Mutex::new(HashMap::new()),
+            last_local_input: std::sync::Mutex::new(LocalInputTimes::default()),
+            last_escape_release: std::sync::Mutex::new(None),
         });
         (coordinator, events_rx)
     }
@@ -401,58 +412,197 @@ impl Coordinator {
     ///   `Emergency Stop` is a separate, deliberate action
     ///   (`emergency_stop`/`resume`) — touching your own mouse doesn't
     ///   need a manual "Resume" click to hand control back next time.
-    /// - **Emergency Stop hotkey**: Ctrl+Shift+Escape toggles
-    ///   `emergency_stop`/`resume` and is consumed here rather than
-    ///   forwarded — this is `ROADMAP.md`'s "global hotkey toggle"
-    ///   fallback for edge-detection (⬜), and unlike a GTK
-    ///   `ShortcutController` it works even when Entanglo's window
-    ///   doesn't have focus, since it's caught at the evdev level.
+    /// - **Escape combinations** (`input::escape`): Left Shift+Escape,
+    ///   triple Escape and Ctrl+Shift+Escape return control to this
+    ///   computer while a peer is being controlled. With no peer under
+    ///   control, Ctrl+Shift+Escape toggles `emergency_stop`/`resume`.
+    ///   They are consumed here rather than forwarded, and work even when
+    ///   Entanglo's window doesn't have focus, since they're caught at the
+    ///   evdev level. The X11 grab in the desktop crate runs the same
+    ///   detector as a fallback.
+    ///
+    /// Input devices are rescanned every second. A Bluetooth mouse or
+    /// keyboard that sleeps and reconnects gets a new `/dev/input/event*`
+    /// node; without the rescan, X11 still moves the cursor to an edge
+    /// and the pointer is grabbed, but nothing is forwarded and control
+    /// can never come back.
     pub async fn enable_controller(self: &Arc<Self>) -> std::io::Result<()> {
         let devices = InputCaptureService::enumerate_devices()?;
-        self.controller_device_count
-            .store(devices.len(), std::sync::atomic::Ordering::Relaxed);
         self.controller_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let capture = Arc::new(Mutex::new(InputCaptureService::new()));
-        for device in devices {
-            let mut stream = device.into_event_stream()?;
-            let capture = Arc::clone(&capture);
-            let this = Arc::clone(self);
-            tokio::spawn(async move {
-                loop {
-                    let event = match stream.next_event().await {
-                        Ok(e) => e,
-                        Err(e) => {
-                            tracing::debug!(error = %e, "input device stream ended");
-                            return;
-                        }
-                    };
-                    let translated = capture.lock().await.translate(event);
-                    let Some(input_event) = translated else {
+        let escape = Arc::new(std::sync::Mutex::new(EscapeDetector::new()));
+        let open = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<PathBuf>::new()));
+        for (path, device) in devices {
+            self.capture_device(path, device, &capture, &escape, &open);
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(INPUT_DEVICE_RESCAN);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let devices = match tokio::task::spawn_blocking(InputCaptureService::enumerate_devices).await {
+                    Ok(Ok(devices)) => devices,
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "input device rescan failed");
                         continue;
+                    }
+                    Err(_) => continue,
+                };
+                for (path, device) in devices {
+                    if open.lock().unwrap().contains(&path) {
+                        continue;
+                    }
+                    tracing::info!(?path, name = ?device.name(), "input device connected; capturing it");
+                    this.capture_device(path, device, &capture, &escape, &open);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn capture_device(
+        self: &Arc<Self>,
+        path: PathBuf,
+        device: evdev::Device,
+        capture: &Arc<Mutex<InputCaptureService>>,
+        escape: &Arc<std::sync::Mutex<EscapeDetector>>,
+        open: &Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
+    ) {
+        let name = device.name().unwrap_or_default().to_owned();
+        let mut stream = match device.into_event_stream() {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::debug!(?path, error = %e, "input device could not be streamed");
+                return;
+            }
+        };
+        if !open.lock().unwrap().insert(path.clone()) {
+            return;
+        }
+        let device_count = open.lock().unwrap().len();
+        self.controller_device_count.store(device_count, Ordering::Relaxed);
+        tracing::debug!(?path, %name, "capturing input device");
+        let capture = Arc::clone(capture);
+        let escape = Arc::clone(escape);
+        let open = Arc::clone(open);
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let event = match stream.next_event().await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::info!(?path, %name, error = %e, "input device disconnected");
+                        let mut open = open.lock().unwrap();
+                        open.remove(&path);
+                        this.controller_device_count.store(open.len(), Ordering::Relaxed);
+                        return;
+                    }
+                };
+                let translated = capture.lock().await.translate(event);
+                let Some(input_event) = translated else {
+                    continue;
+                };
+                this.last_local_input.lock().unwrap().observe(&input_event);
+
+                if let Some(key_code) = input_event.key_code {
+                    use crate::protocol::payloads::input_event::InputEventKind;
+                    let pressed = match input_event.kind {
+                        InputEventKind::KeyDown => Some(true),
+                        InputEventKind::KeyUp => Some(false),
+                        _ => None,
                     };
-
-                    if is_emergency_stop_hotkey(&input_event) {
-                        if this.is_emergency_stopped() {
-                            this.resume();
-                        } else {
-                            this.emergency_stop();
+                    if let Some(pressed) = pressed {
+                        let combo = escape.lock().unwrap().observe(
+                            EscapeKey::from_mac_key_code(key_code), pressed, std::time::Instant::now());
+                        if let Some(combo) = combo {
+                            if this.handle_escape_combo(combo, "keyboard capture").await {
+                                continue; // consumed, not forwarded
+                            }
                         }
-                        continue; // consumed, not forwarded
-                    }
-
-                    if let Some(controller_conn_id) = this.being_controlled_by.lock().await.take() {
-                        this.send_release_control(controller_conn_id, "local_input")
-                            .await;
-                    }
-
-                    if this.controller_capture_ready.load(Ordering::Relaxed) {
-                        this.send_to_active_receiver(input_event).await;
                     }
                 }
-            });
+
+                if let Some(controller_conn_id) = this.being_controlled_by.lock().await.take() {
+                    this.send_release_control(controller_conn_id, "local_input")
+                        .await;
+                }
+
+                if this.controller_capture_ready.load(Ordering::Relaxed) {
+                    this.send_to_active_receiver(input_event).await;
+                }
+            }
+        });
+    }
+
+    /// Returns true when the key press was used and must not be forwarded.
+    pub async fn handle_escape_combo(&self, combo: EscapeCombo, source: &str) -> bool {
+        if combo == EscapeCombo::ControlShiftEscape && self.is_emergency_stopped() {
+            self.take_control_back(source);
+            self.resume();
+            tracing::info!(source, "emergency stop lifted by keyboard");
+            return true;
         }
-        Ok(())
+        if let Some(conn_id) = self.take_control_back(source) {
+            tracing::info!(conn_id, ?combo, source, "escape keys returned control to this computer");
+            self.release_peer_modifiers(conn_id).await;
+            return true;
+        }
+        let recently_released = self.last_escape_release.lock().unwrap()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1));
+        if recently_released {
+            return true;
+        }
+        if combo == EscapeCombo::ControlShiftEscape {
+            self.emergency_stop();
+            tracing::info!(source, "emergency stop engaged by keyboard");
+            return true;
+        }
+        false
+    }
+
+    /// Ends the current remote-control session without waiting for the
+    /// virtual cursor to cross back. Synchronous so the X11 poll loop
+    /// can release its grab on the same tick.
+    pub fn take_control_back(&self, reason: &str) -> Option<ConnId> {
+        let conn_id = self.active_receiver.lock().unwrap().take()?;
+        *self.remote_cursor.lock().unwrap() = None;
+        *self.pointer_return.lock().unwrap() = None;
+        *self.last_escape_release.lock().unwrap() = Some(std::time::Instant::now());
+        self.controller_capture_ready.store(false, Ordering::Relaxed);
+        tracing::info!(conn_id, reason, "control returned to this computer");
+        Some(conn_id)
+    }
+
+    /// The modifiers of an escape combination were already forwarded to
+    /// the peer; release them so they are not left held there.
+    pub async fn release_peer_modifiers(&self, conn_id: ConnId) {
+        use crate::protocol::payloads::input_event::InputEventKind;
+        for key_code in [56, 60, 59, 62] {
+            self.send_input(conn_id, InputEventMessage {
+                kind: InputEventKind::KeyUp,
+                x: None,
+                y: None,
+                delta_x: None,
+                delta_y: None,
+                button: None,
+                key_code: Some(key_code),
+                media_key: None,
+                modifier_flags: 0,
+                pressed: Some(false),
+                click_state: None,
+            }).await;
+        }
+    }
+
+    /// Time since evdev capture last saw a key or pointer event, if ever.
+    pub fn local_input_age(&self, kind: LocalInputKind) -> Option<std::time::Duration> {
+        let times = self.last_local_input.lock().unwrap();
+        match kind {
+            LocalInputKind::Keyboard => times.keyboard,
+            LocalInputKind::Pointer => times.pointer,
+        }.map(|at| at.elapsed())
     }
 
     /// Binds a TCP listener and spawns a task that accepts
@@ -1157,16 +1307,30 @@ fn reconnect_required(preferred: Option<&str>, connected: &std::collections::Has
     trusted.iter().any(|id|!connected.contains(id))
 }
 
-/// Ctrl+Shift+Escape — the global Emergency Stop toggle,
-/// `ROADMAP.md`'s "hotkey toggle" fallback for edge-detection. Fixed
-/// combo for Phase 1; a Settings-page rebind is future work.
-fn is_emergency_stop_hotkey(event: &InputEventMessage) -> bool {
-    use crate::protocol::payloads::input_event::{modifier_flags, InputEventKind};
-    const MAC_ESCAPE_KEYCODE: u16 = 53;
-    event.kind == InputEventKind::KeyDown
-        && event.key_code == Some(MAC_ESCAPE_KEYCODE)
-        && event.modifier_flags & modifier_flags::SHIFT != 0
-        && event.modifier_flags & modifier_flags::CONTROL != 0
+const INPUT_DEVICE_RESCAN: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalInputKind {
+    Keyboard,
+    Pointer,
+}
+
+#[derive(Debug, Default)]
+struct LocalInputTimes {
+    keyboard: Option<std::time::Instant>,
+    pointer: Option<std::time::Instant>,
+}
+
+impl LocalInputTimes {
+    fn observe(&mut self, event: &InputEventMessage) {
+        use crate::protocol::payloads::input_event::InputEventKind;
+        let now = Some(std::time::Instant::now());
+        match event.kind {
+            InputEventKind::KeyDown | InputEventKind::KeyUp | InputEventKind::MediaKey => self.keyboard = now,
+            InputEventKind::MouseMove | InputEventKind::MouseDown | InputEventKind::MouseUp
+                | InputEventKind::Scroll => self.pointer = now,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1788,54 +1952,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hotkey_requires_exact_combo() {
-        use crate::protocol::payloads::input_event::{modifier_flags, InputEventKind};
-        let hotkey = |kind, key_code, flags| InputEventMessage {
-            kind,
-            x: None,
-            y: None,
-            delta_x: None,
-            delta_y: None,
-            button: None,
-            key_code,
-            media_key: None,
-            modifier_flags: flags,
-            pressed: Some(true),
-            click_state: None,
-        };
-        let ctrl_shift = modifier_flags::CONTROL | modifier_flags::SHIFT;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn escape_keys_return_control_before_toggling_emergency_stop() {
+        let (coordinator_a, _coordinator_b, _relay_a_rx, _relay_b_rx) =
+            paired_coordinators().await;
+        let conn_id = coordinator_a.active_receiver().await.expect("a controls b");
 
-        assert!(is_emergency_stop_hotkey(&hotkey(
-            InputEventKind::KeyDown,
-            Some(53),
-            ctrl_shift
-        )));
-        // Plain Escape (no modifiers) must not trigger it — this is
-        // the whole reason it's Ctrl+Shift+Escape and not bare Escape.
-        assert!(!is_emergency_stop_hotkey(&hotkey(
-            InputEventKind::KeyDown,
-            Some(53),
-            0
-        )));
-        // Only one of the two required modifiers.
-        assert!(!is_emergency_stop_hotkey(&hotkey(
-            InputEventKind::KeyDown,
-            Some(53),
-            modifier_flags::CONTROL
-        )));
-        // Right combo, wrong key.
-        assert!(!is_emergency_stop_hotkey(&hotkey(
-            InputEventKind::KeyDown,
-            Some(0),
-            ctrl_shift
-        )));
-        // Right combo, wrong kind (key-up shouldn't re-trigger it).
-        assert!(!is_emergency_stop_hotkey(&hotkey(
-            InputEventKind::KeyUp,
-            Some(53),
-            ctrl_shift
-        )));
+        assert!(coordinator_a.handle_escape_combo(EscapeCombo::LeftShiftEscape, "test").await);
+        assert_eq!(coordinator_a.active_receiver().await, None);
+        assert!(!coordinator_a.is_emergency_stopped());
+
+        // The X11 grab reports the same press after evdev already released
+        // control: it is swallowed instead of engaging Emergency Stop.
+        assert!(coordinator_a.handle_escape_combo(EscapeCombo::ControlShiftEscape, "x11").await);
+        assert!(!coordinator_a.is_emergency_stopped());
+
+        *coordinator_a.last_escape_release.lock().unwrap() = None;
+        assert!(!coordinator_a.handle_escape_combo(EscapeCombo::TripleEscape, "test").await,
+            "with nothing under control, Escape keys stay ordinary keys");
+        assert!(coordinator_a.handle_escape_combo(EscapeCombo::ControlShiftEscape, "test").await);
+        assert!(coordinator_a.is_emergency_stopped());
+
+        coordinator_a.set_active_receiver(Some(conn_id)).await;
+        assert!(coordinator_a.handle_escape_combo(EscapeCombo::ControlShiftEscape, "test").await);
+        assert!(!coordinator_a.is_emergency_stopped(), "Ctrl+Shift+Escape lifts Emergency Stop");
+        assert_eq!(coordinator_a.active_receiver().await, None, "and does not re-grab the old peer");
     }
 
     /// PROTOCOL.md §5.6: receiving `releaseControl` MUST make the

@@ -1,6 +1,29 @@
 # Handover — Entanglo for Linux
 
-Last updated 2026-11-09. Read this first; `docs/DEV.md` holds the older history.
+Last updated 2026-11-11. Read this first; `docs/DEV.md` holds the older history.
+
+## 0.1.17 Bluetooth input and escape keys — 2026-11-11
+
+Reported on iMac 1: the local mouse sometimes locked at the screen edge while
+nothing moved on the other iMac, and only quitting Entanglo recovered it.
+Cause: evdev devices were opened only at startup. iMac 1's Bluetooth mouse and
+keyboard reconnect under new `/dev/input/event*` nodes (keyboard appeared
+two minutes after login, mouse after a sleep), so X11 reached the edge and was
+grabbed but no input was forwarded and the return could never be detected.
+
+- Input devices are rescanned every second and reconnected ones are captured.
+- While controlling a peer, Left Shift+Escape, Escape three times and
+  Ctrl+Shift+Escape return control (`input/escape.rs`). They are also read
+  from the X11 keyboard grab, so they work even when evdev lost the keyboard.
+  Held Shift/Control are released on the peer. Ctrl+Shift+Escape with no
+  peer under control still toggles Emergency Stop.
+- If X11 delivers a click or key press during the grab that evdev did not
+  see within 1.5 s, the grab is released automatically.
+- Verified live by the user on iMac 1 with the test build before release.
+
+Not Entanglo: keypad Enter acted as AltGr because the `gb(mac)` XKB variant
+includes `level3(enter_switch)`; fixed on both iMacs with the XKB option
+`keypad:legacy` in `~/.config/kxkbrc`.
 
 ## 0.1.16 pointer-capture fix deployed — 2026-11-09
 

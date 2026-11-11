@@ -28,9 +28,11 @@ use std::sync::Arc;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, ConfigureWindowAux, CreateGCAux, CreateWindowAux, EventMask, GrabMode, GrabStatus, Rectangle, WindowClass};
+use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
-use entanglo_core::net::{ConnId, RemoteEntryEdge};
+use entanglo_core::input::escape::{EscapeDetector, EscapeKey};
+use entanglo_core::net::{ConnId, LocalInputKind, RemoteEntryEdge};
 
 use crate::state::AppShared;
 
@@ -118,7 +120,21 @@ pub struct EdgeWatcher {
     /// Tracked apart from the pointer: another client can briefly hold the
     /// keyboard, in which case the poll loop retries this grab alone.
     keyboard_grabbed: bool,
+    /// Escape combinations seen through the X11 keyboard grab. This works
+    /// even when evdev capture has lost the keyboard.
+    escape: EscapeDetector,
 }
+
+/// Input that X11 delivered to our grab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrabbedInput {
+    Key { keycode: u8, pressed: bool },
+    ButtonPress,
+}
+
+/// How stale evdev may be when X11 reports a click or key press during a
+/// grab before capture is considered to have lost that device.
+const CAPTURE_BLIND_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
 
 impl EdgeWatcher {
     /// `None` if there's no X11 display to connect to (a Wayland-only
@@ -162,6 +178,7 @@ impl EdgeWatcher {
             saved_pointer: None,
             grabbed: false,
             keyboard_grabbed: false,
+            escape: EscapeDetector::new(),
         })
     }
 
@@ -236,6 +253,7 @@ impl EdgeWatcher {
             .and_then(|cookie| cookie.reply().ok());
         if reply.is_some_and(|reply| reply.status == GrabStatus::SUCCESS) {
             self.keyboard_grabbed = true;
+            self.escape.reset();
             tracing::info!("keyboard grabbed while controlling a peer");
         } else {
             tracing::debug!("keyboard grab unavailable; retrying");
@@ -293,6 +311,20 @@ impl EdgeWatcher {
                 tracing::warn!(error = %e, "XGrabPointer failed");
             }
         }
+    }
+
+    /// Key and button presses X11 delivered to the grab since the last tick.
+    fn drain_grabbed_input(&mut self) -> Vec<GrabbedInput> {
+        let mut input = Vec::new();
+        while let Ok(Some(event)) = self.conn.poll_for_event() {
+            match event {
+                Event::KeyPress(key) => input.push(GrabbedInput::Key { keycode: key.detail, pressed: true }),
+                Event::KeyRelease(key) => input.push(GrabbedInput::Key { keycode: key.detail, pressed: false }),
+                Event::ButtonPress(_) => input.push(GrabbedInput::ButtonPress),
+                _ => {}
+            }
+        }
+        input
     }
 
     /// Idempotent.
@@ -392,6 +424,7 @@ pub fn start(shared: &Rc<AppShared>) {
         if let Some((edge, fraction)) = shared.backend.coordinator.take_pointer_return() {
             watcher.restore_pointer(edge, fraction);
         }
+        release_if_requested_or_blind(&shared, &mut watcher);
         let mut activation_started = false;
         if let Some(edge) = watcher.poll() {
             // A confined pointer may appear at a local edge. It must not
@@ -436,6 +469,45 @@ pub fn start(shared: &Rc<AppShared>) {
         }
         glib::ControlFlow::Continue
     });
+}
+
+/// Handles input that reached the X11 grab: escape combinations, and clicks
+/// or key presses that evdev capture did not see. The latter means capture
+/// lost the device, so holding the grab would lock this computer's mouse.
+fn release_if_requested_or_blind(shared: &Rc<AppShared>, watcher: &mut EdgeWatcher) {
+    let input = watcher.drain_grabbed_input();
+    if !(watcher.grabbed || watcher.keyboard_grabbed) {
+        return;
+    }
+    let coordinator = &shared.backend.coordinator;
+    let now = std::time::Instant::now();
+    let mut release = None;
+    for event in input {
+        let (kind, pressed) = match event {
+            GrabbedInput::Key { keycode, pressed } => {
+                if watcher.escape.observe(EscapeKey::from_x11_keycode(keycode), pressed, now).is_some() {
+                    release = Some("escape keys (X11)");
+                }
+                (LocalInputKind::Keyboard, pressed)
+            }
+            GrabbedInput::ButtonPress => (LocalInputKind::Pointer, true),
+        };
+        if pressed && capture_is_blind(coordinator.local_input_age(kind)) {
+            tracing::warn!(?kind, "local input capture is not receiving this device; releasing the pointer");
+            release.get_or_insert("input capture lost a device");
+        }
+    }
+    let Some(reason) = release else { return };
+    if let Some(conn_id) = coordinator.take_control_back(reason) {
+        let coordinator = Arc::clone(coordinator);
+        shared.backend.handle.spawn(async move { coordinator.release_peer_modifiers(conn_id).await });
+    }
+    coordinator.set_controller_capture_ready(false);
+    watcher.ungrab();
+}
+
+fn capture_is_blind(age: Option<std::time::Duration>) -> bool {
+    age.is_none_or(|age| age > CAPTURE_BLIND_AFTER)
 }
 
 /// Extracted so this specific decision — the one that caused a real
@@ -567,6 +639,13 @@ mod tests {
         assert_eq!(edge_at(960, 1079, 1920, 1080), Some(ScreenEdge::Bottom));
         assert_eq!(edge_at(960, 540, 1920, 1080), None);
         assert_eq!(edge_at(0, 0, 1920, 1080), Some(ScreenEdge::Left));
+    }
+
+    #[test]
+    fn capture_is_blind_only_when_evdev_missed_the_press() {
+        assert!(capture_is_blind(None));
+        assert!(capture_is_blind(Some(std::time::Duration::from_secs(5))));
+        assert!(!capture_is_blind(Some(std::time::Duration::from_millis(30))));
     }
 
     #[test]

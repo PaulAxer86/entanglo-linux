@@ -135,6 +135,9 @@ pub fn build(shared: &Rc<AppShared>) -> Widget {
     column.append(&connected);
 
     let shortcuts = section("Shortcuts");
+    let (row, shortcut) = value_row("Take back mouse and keyboard");
+    shortcut.set_text("Left Shift+Escape, Escape 3 times");
+    shortcuts.add(&row);
     let (row, shortcut) = value_row("Emergency stop");
     shortcut.set_text("Ctrl+Shift+Escape");
     shortcuts.add(&row);

@@ -62,7 +62,11 @@ impl InputCaptureService {
     /// into an infinite loop (and, once Checkpoint D's `releaseControl`
     /// lands, immediately releasing control the instant it was
     /// granted).
-    pub fn enumerate_devices() -> std::io::Result<Vec<evdev::Device>> {
+    ///
+    /// Paths are returned so callers can rescan and open only devices
+    /// that appeared later, such as a Bluetooth mouse or keyboard that
+    /// reconnected under a new `/dev/input/event*` node.
+    pub fn enumerate_devices() -> std::io::Result<Vec<(std::path::PathBuf, evdev::Device)>> {
         let mut devices = Vec::new();
         for (path, device) in evdev::enumerate() {
             if device.name() == Some(crate::input::inject::VIRTUAL_DEVICE_NAME) {
@@ -73,8 +77,7 @@ impl InputCaptureService {
                     .supported_events()
                     .contains(evdev::EventType::RELATIVE);
             if supports_input {
-                tracing::debug!(?path, name = ?device.name(), "capturing input device");
-                devices.push(device);
+                devices.push((path, device));
             }
         }
         Ok(devices)

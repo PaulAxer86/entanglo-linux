@@ -5,7 +5,7 @@ pub mod session;
 pub mod transport;
 pub mod trust_store;
 
-pub use coordinator::{ConnId, Coordinator, CoordinatorEvent, Direction, RemoteEntryEdge};
+pub use coordinator::{ConnId, Coordinator, CoordinatorEvent, Direction, LocalInputKind, RemoteEntryEdge};
 pub use discovery::{DiscoveredPeer, DiscoveryService, DiscoveryEvent};
 pub use session::{run_session, OutgoingMessage, SessionConfig, SessionEvent};
 pub use transport::NetworkTransport;

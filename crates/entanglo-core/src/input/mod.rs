@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod escape;
 pub mod inject;
 pub mod modifiers;
 
