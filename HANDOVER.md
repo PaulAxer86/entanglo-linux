@@ -20,6 +20,8 @@ grabbed but no input was forwarded and the return could never be detected.
 - If X11 delivers a click or key press during the grab that evdev did not
   see within 1.5 s, the grab is released automatically.
 - Verified live by the user on iMac 1 with the test build before release.
+- Published: Linux `07247af`, release v0.1.17, website `ea9ee8a`. Release
+  text now comes from `packaging/release-notes.json`; update it each release.
 
 Not Entanglo: keypad Enter acted as AltGr because the `gb(mac)` XKB variant
 includes `level3(enter_switch)`; fixed on both iMacs with the XKB option

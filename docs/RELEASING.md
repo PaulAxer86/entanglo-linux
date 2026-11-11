@@ -1,7 +1,9 @@
 # Linux release pipeline
 
 1. Fix and test the Linux app. Bump `workspace.package.version` in Cargo.toml
-   and the `.deb` name in README.md, then refresh Cargo.lock with
+   and the `.deb` name in README.md, write the title and highlights in
+   `packaging/release-notes.json` (they become `latest-linux.json` and the
+   GitHub release text), then refresh Cargo.lock with
    `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update --workspace`.
 2. Push the source to `PaulAxer86/entanglo-linux` main.
 3. Linux CI builds and tests on Debian 12, creates the `.deb`, and publishes

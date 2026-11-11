@@ -27,22 +27,15 @@ try:
 except urllib.error.HTTPError as error:
     if error.code != 404: raise
 package = root / f'dist/entanglo-linux_{version}_amd64.deb'
+notes = json.loads((root / 'packaging/release-notes.json').read_text())
 manifest = {
     'version': version, 'date': datetime.date.today().isoformat(),
-    'title': f'Linux {version}: keep the local pointer still during remote control',
+    'title': f"Linux {version}: {notes['title']}",
     'url': f'https://github.com/{repository}/releases/download/v{version}/{package.name}',
     'sha256': hashlib.sha256(package.read_bytes()).hexdigest(), 'size': package.stat().st_size,
     'minimumSystemVersion': 'Debian 12', 'architecture': 'amd64',
     'sourceCommit': os.environ['RELEASE_SHA'],
-    'highlights': ['Confine and hide the local cursor while controlling another screen.',
-                   'Forward physical input only after X11 confirms pointer and keyboard capture.',
-                   'Release confinement on return, emergency stop and application exit.',
-                   'Automatically prefer a reachable Ethernet path for trusted peers, with Wi-Fi fallback.',
-                   'Keep each Bonjour interface and address, including scoped link-local IPv6.',
-                   'Use the selected connection for input, files and clipboard; show its actual interface.',
-                   'Forward volume, brightness and playback keys; return the pointer at the adjoining edge.',
-                   'Adjust remote pointer speed independently on each controller.',
-                   'Clean up failed TCP sessions so automatic reconnect can recover.'],
+    'highlights': notes['highlights'],
 }
 manifest_path = root / 'dist/latest-linux.json'
 manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')

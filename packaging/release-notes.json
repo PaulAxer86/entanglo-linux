@@ -1,0 +1,10 @@
+{
+  "title": "Bluetooth mice and keyboards keep working, with new keys to take control back",
+  "highlights": [
+    "Pick up a Bluetooth mouse or keyboard again within a second after it sleeps and reconnects.",
+    "Left Shift+Escape or Escape three times brings the mouse and keyboard back while controlling another computer.",
+    "Ctrl+Shift+Escape remains the emergency stop when no other computer is being controlled.",
+    "Escape keys also work through the X11 grab when capture has lost the keyboard.",
+    "Release the local mouse automatically when a click or key press is not being captured."
+  ]
+}
