@@ -9,7 +9,7 @@ Tested live on Debian 13 with macOS Entanglo 0.1.60.
 Download the Linux `.deb` from <https://entanglo.pages.dev/download>:
 
 ```sh
-sudo apt install ./entanglo-linux_0.1.17_amd64.deb
+sudo apt install ./entanglo-linux_0.1.18_amd64.deb
 sudo usermod -aG input "$USER"
 ```
 

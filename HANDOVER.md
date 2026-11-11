@@ -2,6 +2,13 @@
 
 Last updated 2026-11-11. Read this first; `docs/DEV.md` holds the older history.
 
+## 0.1.18 monochrome tray icon — 2026-11-11
+
+The tray showed the white app badge. It now shows the rabbit glyph alone,
+recolored to `[Colors:Window] ForegroundNormal` from `kdeglobals` (white when
+there is no KDE scheme). `scripts/make-tray-icons.py` regenerates
+`crates/entanglo-linux/data/icons/tray/` from the 256 px badge.
+
 ## 0.1.17 Bluetooth input and escape keys — 2026-11-11
 
 Reported on iMac 1: the local mouse sometimes locked at the screen edge while

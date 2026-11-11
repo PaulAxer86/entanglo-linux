@@ -1,10 +1,8 @@
 {
-  "title": "Bluetooth mice and keyboards keep working, with new keys to take control back",
+  "title": "A tray icon that matches your panel",
   "highlights": [
-    "Pick up a Bluetooth mouse or keyboard again within a second after it sleeps and reconnects.",
-    "Left Shift+Escape or Escape three times brings the mouse and keyboard back while controlling another computer.",
-    "Ctrl+Shift+Escape remains the emergency stop when no other computer is being controlled.",
-    "Escape keys also work through the X11 grab when capture has lost the keyboard.",
-    "Release the local mouse automatically when a click or key press is not being captured."
+    "The tray shows the rabbit as a monochrome symbol instead of the white app badge, like the desktop's own status icons.",
+    "It follows the KDE color scheme: light on dark panels such as Breeze Dark, dark on light ones.",
+    "Includes 0.1.17: Bluetooth mice and keyboards are picked up again after reconnecting, and Left Shift+Escape or Escape three times takes control back."
   ]
 }
